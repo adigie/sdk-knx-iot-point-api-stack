@@ -292,8 +292,9 @@ extern "C"
    *        e.g. sends out a read s-mode message request when the 'read on init' I flag
    *        is set.
    *
-   * @note only applicable if device can also receive (publisher table must be
-   *       present)
+   * @note 
+   * - only applicable if device can also receive (publisher table must be present)
+   * - messages are send out delayed, to avoid a flood of messages on startup
    *
    */
   void oc_init_datapoints_at_initialization(void);

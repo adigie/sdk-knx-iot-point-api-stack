@@ -350,7 +350,7 @@ int oc_main_init(const oc_handler_t* handler)
     app_callbacks->requests_entry();
   }
 
-  // check and send on i-flags
+  // check and send on i-flags, messages are send out delayed, so first is NOT send out immediately
   oc_init_datapoints_at_initialization();
   #endif
 

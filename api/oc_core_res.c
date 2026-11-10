@@ -208,7 +208,7 @@ int oc_core_reset_device_hostname_to_default(void)
 {
   /* 
      serial number is set during stack init
-     - skip if called before init (e.g. shell factory_reset before OT joins) - Only applicable inDEBUG mode 
+     - skip if called before init (e.g. shell factory_reset before OT joins) - Only applicable in DEBUG mode 
      - oc_core_load_device_hostname() will regenerate the default once the stack initializes and the 
        serial number is available 
   */
