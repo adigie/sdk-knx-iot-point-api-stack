@@ -5,7 +5,7 @@ Defects in the stack found by its tests that are still open.
 A finding is removed once it is fixed (its test then asserts the corrected
 behaviour) or withdrawn. Numbers are never reused, and tests and comments
 keep citing them: `git log -p -S "F-NNN" -- tests/FINDINGS.md` shows a
-removed entry. The next number is F-070.
+removed entry. The next number is F-071.
 
 ## ~~F-029: `oc_endpoint_print()` frees an uninitialized string for non-IPv6 endpoints~~ - FIXED
 
@@ -490,3 +490,17 @@ removed entry. The next number is F-070.
 - **Evidence:** code reading.
 - **Expected:** the oc_ri lookup walks the chain once (`resource = resource->next`, the chain ends with `next == NULL` after the last core resource); the list handlers may walk their range once the same way and pass a 'no skipping' counter instead of their loop counter (e.g. `int no_skip = 0`, first entry 0).
 - **Fix:** the oc_ri lookup walks the core resource chain once from index 0 (`next`, ends with NULL at `/.well-known/core`): one lookup by index instead of `OC_NUM_CORE_RESOURCES` (53). The five list handlers (`/dev`, the app list, `/auth/o`, `/auth`, `/swu`) look up `first_entry` once, then follow `next`, and call `oc_check_request_from_resource()` directly with a local `no_skip` counter (0, first entry 0) instead of their loop counter. `/.well-known/core` (5 non-consecutive indices) is kept. While there: the wildcard test of the lookup reads the last char with the known length (no `strlen` per core resource), and the then unused `oc_uri_contains_wildcard()` (public helper, read `uri[-1]` for an empty string) is removed. Tests: `test_oc_ri`, `RiEntityHandlerPaths.CoreLookupWalksTheChainOnce` (fails without the fix: 53 lookups), `CoreChainEndsWithWellKnownCore` (OC_NUM_CORE_RESOURCES entries, the last `/.well-known/core` with next NULL); `test_oc_knx_swu`, `KnxSwuList.ListWalksTheCoreChainOnce` (fails without the fix: 11 lookups); `--wrap=oc_core_get_core_resource_by_index` counts the lookups (pass through).
+
+## ~~F-070: the response to an own request is matched to the first context of its token, which can be a cached recipient context~~ - FIXED
+
+- **Files:** `security/oc_oscore_context.c`, `oc_oscore_find_context_by_token_mid()` case (c) (transaction without s-mode flag: echo re-request, OBSERVE request); used by `security/oc_oscore_engine.c`, `oc_oscore_recv_message()` for an inbound response; `api/oc_knx_sec.c`, `oc_init_oscore_from_storage()` (POST /auth/at).
+- **Severity:** Medium - the response to an own request (e.g. the echo re-request after an Echo challenge) is dropped silently: no answer for the re-request.
+- **Description:**
+  - case (c) took the FIRST context of the transaction's access token (`sender_only = false`), sender or recipient
+  - the stack keeps one context per ID: a sender context (sender id = osc:id) protects own requests, a recipient context (recipient id = osc:id, empty sender id) is cached for the peer's requests with the same token
+  - `oc_init_oscore_from_storage()` (POST /auth/at without a key change of that token) frees the sender contexts and re-adds them at the END of the list, behind a cached recipient context -> (c) then returns the recipient context
+  - RFC 8613 8.4 step 2: the response is verified with the Security Context associated with the token, i.e. the one that protected the request (8.1); 5.4: `request_kid` is the kid (Sender ID) of the request -> the recipient context has an empty sender id and keys of the other direction, the AEAD check fails
+  - not seen by the tests: the unit fixture of `OscoreContextByToken` used a recipient context only and asserted it as the result; no runtime or conformance sequence has a peer request on token X, then POST /auth/at, then an own request with X answered with an Echo challenge
+- **Evidence:** test below.
+- **Expected:** case (c) looks up the sender context of the token, as (a) and (b) do.
+- **Fix:** case (c) calls `oc_oscore_find_context_by_access_token(..., true)` (sender context only); the comment table of the function says why (RFC 8613 8.4, 5.4; re-add order after POST /auth/at). Tests: `test_oc_oscore_context`, the `OscoreContextByToken` fixture uses a sender context (what protects an own request), `ResponseIsMatchedToTheSenderContextNotACachedRecipientContext` (recipient context of the token first in the list, then the sender context -> the sender context is returned; fails without the fix: the recipient context).

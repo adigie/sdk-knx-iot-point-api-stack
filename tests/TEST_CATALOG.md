@@ -318,7 +318,7 @@ OSCORE Option (48 tests)
 
 ---
 
-### test_oc_oscore_context.cpp — OSCORE Context (39 tests)
+### test_oc_oscore_context.cpp — OSCORE Context (40 tests)
 
 **Source:** `security/oc_oscore_context.c`
 
@@ -326,7 +326,7 @@ OSCORE Option (48 tests)
 |-------|-------|----------------|
 | `ContextDeriveParam` | 4 | HKDF key derivation (sender key, IV, with context, uniqueness) |
 | `OscoreContextTest` | 16 | Add/find/free contexts, bad params, kid_context, find-by-group-address (sender/recipient), LRU recipient eviction, free-by-AT-id, and the recipient/sender context builders that take their ID from the access token |
-| `OscoreContextByToken` | 5 | `oc_oscore_find_context_by_token_mid`: match by token (returns the request PIV), MID fallback, optional out-parameters, unknown transaction → NULL, transaction without an access token → NULL |
+| `OscoreContextByToken` | 6 | `oc_oscore_find_context_by_token_mid`: match by token (returns the request PIV), MID fallback, optional out-parameters, unknown transaction → NULL, transaction without an access token → NULL; the response to an own request is matched to the SENDER context of the token (fixture: a sender context), also when a cached recipient context of the token comes first in the list |
 | Access token and multicast lookup | 3 | multicast lookup skips the `at` of a unicast recipient (spec 6.3.2.1); `oc_oscore_find_context_by_access_token` with `sender_only` true/false; NULL or unknown token -> NULL |
 
 ---
