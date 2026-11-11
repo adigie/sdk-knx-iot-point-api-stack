@@ -681,6 +681,14 @@ static void oc_core_auth_at_get_handler(oc_request_t* request, oc_interface_mask
 #define AT_SEEN_OSC_CONTEXTID  (1u << 7)
 #define AT_SEEN_MANDATORY      (AT_SEEN_ID | AT_SEEN_SCOPE | AT_SEEN_PROFILE | AT_SEEN_OSC_ID | AT_SEEN_OSC_MS)
 
+/*
+  key material of a committed token -> the OSCORE contexts are re-initialized
+  - the osc members (alg, ms, contextId, id, salt) are only parsed inside cnf -> each of them implies AT_SEEN_CNF
+  - a committed token carrying cnf has all mandatory members (else case a / e rejects it) -> cnf = key material
+  - the profile decides whether an OSCORE context exists at all
+*/
+#define AT_SEEN_KEY_MATERIAL   (AT_SEEN_CNF | AT_SEEN_PROFILE)
+
 #define AT_ALLOC_OSC_ID        (1u << 8)
 #define AT_ALLOC_OSC_MS        (1u << 9)
 #define AT_ALLOC_OSC_SALT      (1u << 10)
@@ -765,9 +773,6 @@ static void oc_core_auth_at_post_handler(oc_request_t* request, oc_interface_mas
 
   // default assumption
   oc_status_t return_status = OC_STATUS_BAD_REQUEST;
-
-  // any token of the request carries key material (cnf:osc members or profile) -> the OSCORE contexts are re-initialized
-  bool key_material_updated = false;
 
   oc_auth_at_t* at_entry = NULL;
 
@@ -1049,9 +1054,6 @@ static void oc_core_auth_at_post_handler(oc_request_t* request, oc_interface_mas
           {
             tmp.profile = (oc_at_profile_t)object->value.integer;
             member_flags |= AT_SEEN_PROFILE;
-
-            // the profile decides whether an OSCORE context exists at all -> the contexts must be re-initialized
-            key_material_updated = true;
           }
         }
         else if (object->type == OC_REP_OBJECT)
@@ -1092,8 +1094,6 @@ static void oc_core_auth_at_post_handler(oc_request_t* request, oc_interface_mas
                       at_post_reject(request, entries, entry_count, &tmp, member_flags, OC_STATUS_BAD_REQUEST);
                       return;
                     }
-
-                    key_material_updated = true;
                   }
                 }
                 else if (oscore_object->type == OC_REP_BYTE_STRING)
@@ -1129,7 +1129,6 @@ static void oc_core_auth_at_post_handler(oc_request_t* request, oc_interface_mas
                     }
                     oc_new_byte_string(&tmp.osc_ms, mastersecret_ptr, mastersecret_size);
                     member_flags |= AT_SEEN_OSC_MS | AT_ALLOC_OSC_MS;
-                    key_material_updated = true;
                   }
                   else if (cnf_object_nr == 8 && oscore_object_nr == 4 && oscore_object->iname == 6)
                   {
@@ -1151,7 +1150,6 @@ static void oc_core_auth_at_post_handler(oc_request_t* request, oc_interface_mas
                     }
                     oc_new_byte_string(&tmp.osc_contextid, oc_string(oscore_object->value.string), id_context_size);
                     member_flags |= AT_SEEN_OSC_CONTEXTID | AT_ALLOC_OSC_CONTEXTID;
-                    key_material_updated = true;
                   }
                   else if (cnf_object_nr == 8 && oscore_object_nr == 4 && oscore_object->iname == 0)
                   {
@@ -1173,7 +1171,6 @@ static void oc_core_auth_at_post_handler(oc_request_t* request, oc_interface_mas
                     }
                     oc_new_byte_string(&tmp.osc_id, oc_string(oscore_object->value.string), sender_id_size);
                     member_flags |= AT_SEEN_OSC_ID | AT_ALLOC_OSC_ID;
-                    key_material_updated = true;
                   }
                   else if (cnf_object_nr == 8 && oscore_object_nr == 4 && oscore_object->iname == 5)
                   {
@@ -1185,7 +1182,6 @@ static void oc_core_auth_at_post_handler(oc_request_t* request, oc_interface_mas
                     }
                     oc_new_byte_string(&tmp.osc_salt, oc_string(oscore_object->value.string), oc_string_len(oscore_object->value.string));
                     member_flags |= AT_SEEN_OSC_SALT | AT_ALLOC_OSC_SALT;
-                    key_material_updated = true;
                   }
                 }
 
@@ -1288,6 +1284,9 @@ static void oc_core_auth_at_post_handler(oc_request_t* request, oc_interface_mas
     rep = rep->next;
   }
 
+  // member flags of all committed tokens of the request (deletes add none)
+  uint16_t request_flags = 0;
+
   // all entries passed -> commit them in request order, nothing can fail from here on
   for (at_post_entry_t* pending = entries; pending < entries + entry_count; pending++)
   {
@@ -1297,6 +1296,9 @@ static void oc_core_auth_at_post_handler(oc_request_t* request, oc_interface_mas
     }
     else
     {
+      // collect all access token's member flags, used to decide whether the OSCORE contexts are re-initialized at the end
+      request_flags |= pending->member_flags;
+
       if (pending->free_contexts)
       {
         oc_oscore_free_contexts_at_id(pending->at_entry);
@@ -1333,13 +1335,14 @@ static void oc_core_auth_at_post_handler(oc_request_t* request, oc_interface_mas
        - scope update   -> the contexts stay valid
        - id-only delete -> oc_delete_at_table_entry() already freed the contexts of the deleted token
        - no-op update   -> nothing changed
-       - a created token always carries cnf (mandatory) -> key_material_updated is set, no extra check of 'created' needed
+       - a created token always carries cnf (mandatory) -> AT_SEEN_KEY_MATERIAL is set
   */
-  if (key_material_updated)
+ 
+  if (request_flags & AT_SEEN_KEY_MATERIAL)
   {
     oc_init_oscore_from_storage(false);
   }
-  OC_DBG("oscore contexts %s", key_material_updated ? "reinitialized" : "kept (no key changed)");
+  OC_DBG("oscore contexts %s", request_flags & AT_SEEN_KEY_MATERIAL ? "reinitialized" : "kept (no key changed)");
 
   // the last return status from a collection with 'n' POST elements is responded (CREATED/CHANGED)
   oc_prepare_no_format_response_no_payload(request, return_status);
