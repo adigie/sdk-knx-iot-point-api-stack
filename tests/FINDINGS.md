@@ -5,7 +5,7 @@ Defects in the stack found by its tests that are still open.
 A finding is removed once it is fixed (its test then asserts the corrected
 behaviour) or withdrawn. Numbers are never reused, and tests and comments
 keep citing them: `git log -p -S "F-NNN" -- tests/FINDINGS.md` shows a
-removed entry. The next number is F-076.
+removed entry. The next number is F-077.
 
 ## ~~F-029: `oc_endpoint_print()` frees an uninitialized string for non-IPv6 endpoints~~ - FIXED
 
@@ -597,3 +597,28 @@ removed entry. The next number is F-076.
 - **Expected:** `OC_REP_NIL` on a key other than ga (7) -> 4.00, the entry unchanged, in all three tables; the empty ga stays as it is (GO 4.00, PUB / RCP accepted for multicast).
 - **Possible fix:** in the three `case OC_REP_NIL`: a key other than 7 -> free the tmp entry and answer 4.00 (as in `default`). Tests: one per table, `{0: <id>, 11: []}` on an existing entry -> 4.00 and the entry unchanged (GO fails today: deleted; PUB / RCP fail today: 2.04).
 - **Fix:** `/fp/g`: the `case OC_REP_NIL` is removed, an empty array on ANY key falls into `default` -> 4.00, nothing changed (a GO needs at least one ga, spec 2.5.7.3.2 Table 18; no other GO member is an array). `/fp/p`, `/fp/r`: `OC_REP_NIL` on a key other than 7 -> 4.00 (tmp entry freed), the empty ga (7) stays accepted for multicast. Tests: `test_oc_knx_fp`, `FpHandlers.GoPostEmptyArrayOnOtherKeyIsRejectedAndKeepsTheEntry`, `PubPostEmptyArrayOnOtherKeyIsRejectedAndKeepsTheEntry`, `RcpPostEmptyArrayOnOtherKeyIsRejectedAndKeepsTheEntry` (`{0: 1, 11: []}` on an existing entry -> 4.00, entry unchanged; all three fail without the fix: GO deleted, PUB / RCP 2.04).
+
+## F-076: a POST /fp/g, /fp/p or /fp/r collection rejected at a later entry leaves the earlier entries stored
+
+- **Files:** `api/oc_knx_fp.c`, `oc_core_fp_g_post_handler()`, the POST handlers of `/fp/p` and `/fp/r` (each entry is checked into its shadow copy and committed (`g_got[entry] = tmp`, `oc_store_..._entry()`) before the next entry is parsed; every 4.00 / 5.00 returns at once).
+- **Severity:** Low / Medium - a collection that fails at a later entry has already stored the earlier entries, but the MaC gets 4.00 / 5.00 and does not know that a part was applied (partial apply, not atomic); no OSCORE contexts are involved (unlike F-071).
+- **Description:**
+  - the GO handler documents it: "on a 4.00 / 5.00 the previously written entries - from a collection - are not restored (currently to complicate)"; `/fp/p` and `/fp/r` work the same way
+  - a collection has no entry limit; the same id twice in one request overwrites the first entry ("last wins") instead of being rejected
+  - `/auth/at` has the same structure since F-071: check pass into shadow copies on the stack, commit pass only when ALL entries passed, at most `AT_POST_MAX_ENTRIES` (10) entries (more -> 4.13), the same id twice -> 4.00, `at_post_reject()` frees the current and all earlier copies and answers the error
+- **Evidence:** code reading.
+- **Expected:** a rejected collection leaves all three tables unchanged (atomic), as on `/auth/at`.
+- **Plan (as on `/auth/at`):**
+  - check pass: each entry into its own shadow copy in a local `entries[]` array; the first error frees all copies and answers 4.00 / 5.00, nothing stored
+  - commit pass: only after all entries passed, each copy is committed and stored in request order
+  - entry limit per request -> 4.13 (spec 2.6.3.3.2, RFC 7252 5.9.2.9); the limit needs a memory estimate first: a GO copy (href, ga array) and a PUB / RCP copy (at, url, ga array) are larger than a token copy, the array lives on the stack (Zephyr, ESP-IDF)
+  - the same id twice in one request -> 4.00 (the id is unique in the table, spec 2.5.7.3.2 Table 18, 2.5.7.4.2)
+  - one reject helper per entry type (GO, PUB / RCP) instead of the repeated "free tmp, respond, return" (about 5 sites per handler)
+- **Already aligned with `/auth/at` (this branch):**
+  - one `uint16_t member_flags` per entry instead of `allocator` + `..._properties_seen`, with the layout shared with `/auth/at` in `api/oc_knx_helpers.h` (`oc_member_flag_t`: seen bits 0 ... 8, alloc bits 9 ... 13, bits 14, 15 reserved for combined sets; `TBL_SEEN_*` / `TBL_ALLOC_*` and `AT_SEEN_*` / `AT_ALLOC_*` are names of the same bits)
+  - every member sets its seen and alloc bits in one statement
+  - `bool id_only` replaced by `MF_SEEN_OTHER` and `mf_is_id_only()` (case c: only the id alone deletes)
+  - `oc_free_allocated_group_object_table_elements()` / `oc_free_allocated_group_table_elements()` are `static` and read only the alloc bits (removed from `oc_knx_fp.h`)
+  - an empty array on a key other than ga -> 4.00 (F-075), any other unexpected type -> 4.00 (`default`)
+- **Open question (not part of this finding):** a re-POST of an existing entry keeps the optional members it does not carry (the shadow copy starts from the live entry), e.g. an RCP entry re-POSTed as multicast keeps its old `at`; spec 2.5.7.3.1 Table 17 / 2.5.7.4.1 Table 20 say "Existing elements are replaced", the handlers implement a partial update (case d) -> to be decided against the spec (as F-073 on `/auth/at`).
+

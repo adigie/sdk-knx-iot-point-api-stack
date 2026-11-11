@@ -1487,6 +1487,70 @@ TEST_F(FpHandlers, GoPostEmptyArrayOnOtherKeyIsRejectedAndKeepsTheEntry)
   oc_ri_delete_resource(r);
 }
 
+/* ───────── POST handlers: an update with only a member without own seen bit ─
+
+   An int member other than the id (here the unknown key 99) sets only
+   TBL_SEEN_OTHER; the request is not "id only", the entry stays (2.04). */
+
+/* { 0: { 0: 1, 99: 5 } } */
+static const uint8_t kTableUnknownIntMember[] = {
+  0xa1, 0x00, 0xa2, 0x00, 0x01, 0x18, 0x63, 0x05
+};
+
+TEST_F(FpHandlers, GoPostWithOnlyAnUnknownMemberKeepsTheEntry)
+{
+  /* the href must name a discoverable resource of the device */
+  oc_resource_t *r = oc_ri_alloc_resource();
+  ASSERT_NE(r, nullptr);
+  r->get_handler.cb = fp_dummy_handler;
+  r->properties = OC_DISCOVERABLE;
+  oc_new_string(&r->uri, "/p/x", 4);
+  ASSERT_TRUE(oc_ri_add_resource(r));
+
+  /* { 0: { 0: 1, 11: "/p/x", 8: w, 7: [9] } } */
+  const uint8_t create[] = {
+    0xa1, 0x00, 0xa4, 0x00, 0x01, 0x0b, 0x64, '/', 'p', '/', 'x', 0x08, 0x10, 0x07, 0x81, 0x09
+  };
+  ASSERT_EQ(invoke_post(core_resource_knx_fp_g, create, sizeof(create)), oc_status_code(OC_STATUS_CREATED));
+
+  EXPECT_EQ(invoke_post(core_resource_knx_fp_g, kTableUnknownIntMember, sizeof(kTableUnknownIntMember)),
+            oc_status_code(OC_STATUS_CHANGED));
+  EXPECT_NE(oc_core_find_index_in_group_object_table_from_id(1), -1);
+
+  /* the fixture's clear_tables() drops the ga pointer without freeing it, the delete frees it */
+  EXPECT_EQ(invoke_post(core_resource_knx_fp_g, kTableDeleteId1, sizeof(kTableDeleteId1)),
+            oc_status_code(OC_STATUS_CHANGED));
+
+  oc_free_string(&r->uri);
+  oc_ri_delete_resource(r);
+}
+
+TEST_F(FpHandlers, PubPostWithOnlyAnUnknownMemberKeepsTheEntry)
+{
+  ASSERT_EQ(invoke_post(core_resource_knx_fp_p, kGroupTableCreate, sizeof(kGroupTableCreate)),
+            oc_status_code(OC_STATUS_CREATED));
+
+  EXPECT_EQ(invoke_post(core_resource_knx_fp_p, kTableUnknownIntMember, sizeof(kTableUnknownIntMember)),
+            oc_status_code(OC_STATUS_CHANGED));
+  EXPECT_NE(oc_core_find_index_in_publisher_table_from_id(1), -1);
+
+  EXPECT_EQ(invoke_post(core_resource_knx_fp_p, kTableDeleteId1, sizeof(kTableDeleteId1)),
+            oc_status_code(OC_STATUS_CHANGED));
+}
+
+TEST_F(FpHandlers, RcpPostWithOnlyAnUnknownMemberKeepsTheEntry)
+{
+  ASSERT_EQ(invoke_post(core_resource_knx_fp_r, kGroupTableCreate, sizeof(kGroupTableCreate)),
+            oc_status_code(OC_STATUS_CREATED));
+
+  EXPECT_EQ(invoke_post(core_resource_knx_fp_r, kTableUnknownIntMember, sizeof(kTableUnknownIntMember)),
+            oc_status_code(OC_STATUS_CHANGED));
+  EXPECT_NE(oc_core_find_index_in_recipient_table_from_id(1), -1);
+
+  EXPECT_EQ(invoke_post(core_resource_knx_fp_r, kTableDeleteId1, sizeof(kTableDeleteId1)),
+            oc_status_code(OC_STATUS_CHANGED));
+}
+
 /* the PUB entry was kept, but the request was answered 2.04 without a change */
 TEST_F(FpHandlers, PubPostEmptyArrayOnOtherKeyIsRejectedAndKeepsTheEntry)
 {

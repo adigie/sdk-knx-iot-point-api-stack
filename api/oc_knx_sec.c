@@ -662,24 +662,8 @@ static void oc_core_auth_at_get_handler(oc_request_t* request, oc_interface_mask
   OC_INF("oc_core_auth_at_get_handler - end");
 }
 
-/*
-  member flags of ONE access token of a POST /auth/at request (uint16_t)
-
-  - low byte  AT_SEEN_*  -> the member is in the request (mandatory check, cnf present, salt/contextId carried)
-                            a bitmask, not a counter: a repeated CBOR key survives oc_parse_rep() as a separate rep,
-                            so counting occurrences would let one member repeated five times stand in for all five mandatory ones
-  - high byte AT_ALLOC_* -> the value was allocated in the shadow copy (as TBL_ALLOC_AT/TBL_ALLOC_GA on fp/r)
-                            freed from the copy on a reject, released from the live entry on commit
-*/
-#define AT_SEEN_ID             (1u << 0)
-#define AT_SEEN_SCOPE          (1u << 1)
-#define AT_SEEN_PROFILE        (1u << 2)
-#define AT_SEEN_CNF            (1u << 3)
-#define AT_SEEN_OSC_ID         (1u << 4)
-#define AT_SEEN_OSC_MS         (1u << 5)
-#define AT_SEEN_OSC_SALT       (1u << 6)
-#define AT_SEEN_OSC_CONTEXTID  (1u << 7)
-#define AT_SEEN_MANDATORY      (AT_SEEN_ID | AT_SEEN_SCOPE | AT_SEEN_PROFILE | AT_SEEN_OSC_ID | AT_SEEN_OSC_MS)
+// member flags of ONE access token of a POST /auth/at request: MF_SEEN_*, AT_SEEN_*, AT_ALLOC_* (layout in oc_knx_helpers.h)
+#define AT_SEEN_MANDATORY      (MF_SEEN_ID | AT_SEEN_SCOPE | AT_SEEN_PROFILE | AT_SEEN_OSC_ID | AT_SEEN_OSC_MS)
 
 /*
   key material of a committed token -> the OSCORE contexts are re-initialized
@@ -688,12 +672,6 @@ static void oc_core_auth_at_get_handler(oc_request_t* request, oc_interface_mask
   - the profile decides whether an OSCORE context exists at all
 */
 #define AT_SEEN_KEY_MATERIAL   (AT_SEEN_CNF | AT_SEEN_PROFILE)
-
-#define AT_ALLOC_OSC_ID        (1u << 8)
-#define AT_ALLOC_OSC_MS        (1u << 9)
-#define AT_ALLOC_OSC_SALT      (1u << 10)
-#define AT_ALLOC_OSC_CONTEXTID (1u << 11)
-#define AT_ALLOC_GA            (1u << 12)
 
 /*
   frees the elements of 'entry' flagged AT_ALLOC_* in 'member_flags' (a set bit = the element was replaced in the shadow copy)
@@ -916,16 +894,14 @@ static void oc_core_auth_at_post_handler(oc_request_t* request, oc_interface_mas
         - a value shared with the live entry (bit not set) is NOT freed there, the commit below releases it
       */
       oc_auth_at_t tmp = *at_entry;
-      uint16_t member_flags = AT_SEEN_ID;
-
-      bool id_only = true; // used to delete the AT table entry
+      uint16_t member_flags = MF_SEEN_ID;
 
       while (object)
       {
         if (object->type == OC_REP_STRING_ARRAY)
         {
           // any extra element - even if not valid - causes a "not an id only"
-          id_only = false;
+          member_flags |= MF_SEEN_OTHER;
 
           // scope with ACL scope string array from MaC such as ["if.sec", "if.swu"]
           if (object->iname == 9)
@@ -982,7 +958,7 @@ static void oc_core_auth_at_post_handler(oc_request_t* request, oc_interface_mas
         else if (object->type == OC_REP_INT_ARRAY)
         {
           // any extra element - even if not valid - causes a "not an id only"
-          id_only = false;
+          member_flags |= MF_SEEN_OTHER;
 
           // scope with GA integer array from MaC such as [200, 201]
           if (object->iname == 9)
@@ -1041,13 +1017,13 @@ static void oc_core_auth_at_post_handler(oc_request_t* request, oc_interface_mas
               NOT id (0), for sure from now on a not 'ID only' case
               Note: id (0) was already scanned/assigned
             */
-            id_only = false;
+            member_flags |= MF_SEEN_OTHER;
           }
         }
         else if (object->type == OC_REP_INT)
         {
           // any extra element - even if not valid - causes a "not an id only"
-          id_only = false;
+          member_flags |= MF_SEEN_OTHER;
 
           // profile (38)
           if (object->iname == 38)
@@ -1059,7 +1035,7 @@ static void oc_core_auth_at_post_handler(oc_request_t* request, oc_interface_mas
         else if (object->type == OC_REP_OBJECT)
         {
           // any extra element - even if not valid - causes a "not an id only"
-          id_only = false;
+          member_flags |= MF_SEEN_OTHER;
 
           // cnf (8): only allowed in a full token, see the check after the loop
           if (object->iname == 8)
@@ -1198,7 +1174,7 @@ static void oc_core_auth_at_post_handler(oc_request_t* request, oc_interface_mas
             any other member type is not valid in an access token -> 4.00, nothing changed (as on fp/g, fp/p, fp/r)
             - an empty array (OC_REP_NIL) such as {0: "tok", 9: []}: no valid scope (spec 3.5.4.2), never "id only"
             - null / undefined (OC_REP_NULL), a type the parser does not map (OC_REP_UNSUPPORTED), bool, float, byte string, ...
-            - without this, such a member left 'id_only' true -> {0: "tok", 9: null} deleted the existing token (case c)
+            - without this, such a member set no MF_SEEN_OTHER -> {0: "tok", 9: null} deleted the existing token (case c)
           */
           OC_ERR("invalid member type %d (key %d)", (int)object->type, (int)object->iname);
           at_post_reject(request, entries, entry_count, &tmp, member_flags, OC_STATUS_BAD_REQUEST);
@@ -1217,7 +1193,7 @@ static void oc_core_auth_at_post_handler(oc_request_t* request, oc_interface_mas
                                                - a full token (with ALL mandatory elements) with the same id is 
                                                  seen as allowed to overwrite, its cnf is accepted (case d)
       */
-      if (return_status == OC_STATUS_CHANGED && id_only)
+      if (return_status == OC_STATUS_CHANGED && mf_is_id_only(member_flags))
       {
         // c, deleted on commit
         OC_DBG("only found id in request, deleting entry...");

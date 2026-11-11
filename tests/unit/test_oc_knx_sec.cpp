@@ -1021,6 +1021,38 @@ TEST_F(SecAtPost, NullMemberIsRejectedAndDoesNotDeleteTheToken)
 }
 
 /*
+  an update carrying only an optional member is not "id only"
+  - token "tok" created
+  - POST { 0: { 0: "tok", 2: "sub" } } -> 2.04 ('sub' sets no own seen bit, only AT_SEEN_OTHER)
+  - the token still exists (only the id alone deletes, spec 2.6.7.2)
+*/
+TEST_F(SecAtPost, UpdateWithOnlyAnOptionalMemberKeepsTheToken)
+{
+  const std::vector<uint8_t> create = make_complete_at_payload(16, false, 1, 10);
+  ASSERT_EQ(post_at(create.data(), create.size()), oc_status_code(OC_STATUS_CREATED));
+  oc_free_rep(payload);
+  payload = nullptr;
+
+  oc_auth_at_t* e = oc_core_find_at_entry_by_access_token("tok", 3);
+  ASSERT_NE(e, nullptr);
+
+  /* { 0: { 0: "tok", 2: "sub" } } */
+  const uint8_t cbor[] = {
+    0xa1, 0x00,
+    0xa2,
+    0x00, 0x63, 't', 'o', 'k',
+    0x02, 0x63, 's', 'u', 'b'
+  };
+  EXPECT_EQ(post_at(cbor, sizeof(cbor)), oc_status_code(OC_STATUS_CHANGED));
+
+  EXPECT_EQ(oc_core_find_at_entry_by_access_token("tok", 3), e);
+  EXPECT_EQ(oc_byte_string_len(e->osc_ms), 16u);
+
+  /* the entry was also stored, keep storage clean for the following tests */
+  oc_delete_at_table();
+}
+
+/*
   an empty scope array on an existing token is rejected, not answered 2.04 without a change
   - token "tok" created with scope ["if.sec"]
   - POST { 0: { 0: "tok", 9: [] } } -> 4.00 (an empty array is no valid scope, spec 3.5.4.2)

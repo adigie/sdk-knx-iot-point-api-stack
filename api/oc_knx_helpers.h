@@ -167,6 +167,65 @@ int oc_frame_query_l(char* url, bool ps_exists, int ps, bool total_exists, int t
  */
 int oc_frame_integer(const int value);
 
+/*
+  member flags of ONE entry of a POST (uint16_t), one layout for auth/at, fp/g, fp/p, fp/r
+
+  - bits 0 ... 8   *_SEEN_*  -> the member is in the request (mandatory check, cnf present, salt/contextId carried,
+                                any member besides the id -> not 'id only')
+                                a bitmask, not a counter: a repeated CBOR key survives oc_parse_rep() as a separate rep,
+                                so counting occurrences would let one member repeated five times stand in for all mandatory ones
+  - bits 9 ... 13  *_ALLOC_* -> the value was allocated in the shadow copy
+                                freed from the copy on a reject, released from the live entry on commit
+  - bits 14, 15              -> reserved for combined sets
+
+  FACTS:
+  1. the same bit has a name per module (AT_* on auth/at, TBL_* on fp/g, fp/p, fp/r) -> an enum may hold the same value
+     under different names, two names with one value are INTENDED here
+  2. MF_SEEN_ID and MF_SEEN_OTHER mean the same in all modules -> shared names
+  3. masks (mandatory members, key material) are combinations of bits and stay in their module
+*/
+typedef enum
+{
+  // shared by all modules
+  MF_SEEN_ID             = 1u << 0,   // id (0), set before the member loop (a missing id is a 4.00 there)
+  MF_SEEN_OTHER          = 1u << 8,   // any member besides the id -> not 'id only' (case c deletes on the id alone)
+
+  // auth/at
+  AT_SEEN_SCOPE          = 1u << 1,   // scope (9)
+  AT_SEEN_PROFILE        = 1u << 2,   // profile (38)
+  AT_SEEN_CNF            = 1u << 3,   // cnf (8)
+  AT_SEEN_OSC_ID         = 1u << 4,   // cnf:osc:id (8:4:0)
+  AT_SEEN_OSC_MS         = 1u << 5,   // cnf:osc:ms (8:4:2)
+  AT_SEEN_OSC_SALT       = 1u << 6,   // cnf:osc:salt (8:4:5)
+  AT_SEEN_OSC_CONTEXTID  = 1u << 7,   // cnf:osc:contextId (8:4:6)
+  AT_ALLOC_OSC_ID        = 1u << 9,
+  AT_ALLOC_OSC_MS        = 1u << 10,
+  AT_ALLOC_OSC_SALT      = 1u << 11,
+  AT_ALLOC_OSC_CONTEXTID = 1u << 12,
+  AT_ALLOC_GA            = 1u << 13,  // ga array of a <ga> scope, also set when a string scope removes it
+
+  // fp/g, fp/p, fp/r
+  TBL_SEEN_GA            = 1u << 1,   // ga (7)
+  TBL_SEEN_CFLAG         = 1u << 2,   // cflag (8), go table
+  TBL_SEEN_HREF          = 1u << 3,   // href (11), go table
+  TBL_SEEN_IA            = 1u << 4,   // ia (12), pub/rcp table
+  TBL_SEEN_GRPID         = 1u << 5,   // grpid (13), pub/rcp table
+  TBL_SEEN_AT            = 1u << 6,   // at (14), pub/rcp table
+  TBL_ALLOC_HREF         = 1u << 9,   // go table href
+  TBL_ALLOC_AT           = 1u << 10,  // pub/rcp table access token reference
+  TBL_ALLOC_GA           = 1u << 11,  // pub/rcp/go table ga list
+} oc_member_flag_t;
+
+#define MF_SEEN_MASK     0x01FFu  // bits 0 ... 8
+#define MF_ALLOC_MASK    0x3E00u  // bits 9 ... 13
+#define MF_COMBINED_MASK 0xC000u  // bits 14, 15
+
+// true if the entry carried nothing but its id (case c: an existing entry is deleted)
+static inline bool mf_is_id_only(uint16_t member_flags)
+{
+  return (member_flags & MF_SEEN_OTHER) == 0;
+}
+
 #ifdef __cplusplus
 }
 #endif

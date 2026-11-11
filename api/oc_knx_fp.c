@@ -29,25 +29,9 @@ extern const oc_resource_t core_resource_knx_p;
 // PUB/RCV/GOT storage data: see the KNX_STORAGE_KEY_*_ENTRY keys in oc_knx_fp.h
 
 /*
-  member flags of ONE go/pub/rcp table entry of a POST (uint16_t, as for auth/at)
-
-  - low byte  TBL_SEEN_*  -> the member is in the request (mandatory check)
-                             a bitmask, not a counter: a repeated CBOR key survives oc_parse_rep() as a separate rep
-  - high byte TBL_ALLOC_* -> the value was allocated in the shadow copy
-                             freed from the copy on a reject, released from the live entry on commit
+  member flags of ONE go/pub/rcp table entry of a POST: MF_SEEN_*, TBL_SEEN_*, TBL_ALLOC_* (layout in oc_knx_helpers.h)
   - a repeated key -> last wins (as on auth/at), the allocation of an earlier ga/href/at in the same request is released
 */
-#define TBL_SEEN_ID    (1u << 0)  // id (0), scanned before the key loop, a missing id is a 4.00 before
-#define TBL_SEEN_GA    (1u << 1)  // ga (7)
-#define TBL_SEEN_CFLAG (1u << 2)  // cflag (8), go table
-#define TBL_SEEN_HREF  (1u << 3)  // href (11), go table
-#define TBL_SEEN_IA    (1u << 4)  // ia (12), pub/rcp table
-#define TBL_SEEN_GRPID (1u << 5)  // grpid (13), pub/rcp table
-#define TBL_SEEN_AT    (1u << 6)  // at (14), pub/rcp table
-
-#define TBL_ALLOC_HREF (1u << 8)  // go table href
-#define TBL_ALLOC_AT   (1u << 9)  // pub/rcp table access token reference
-#define TBL_ALLOC_GA   (1u << 10) // pub/rcp/go table ga list
 
 static void oc_free_allocated_group_object_table_elements(oc_group_object_table_t* entry, uint16_t member_flags);
 static void oc_free_allocated_group_table_elements(oc_group_table_t* entry, uint16_t member_flags);
@@ -469,10 +453,7 @@ static void oc_core_fp_g_post_handler(oc_request_t* request, oc_interface_mask_t
         }
 
         // id, ga array (filled or empty), cflags and href must be present
-        #define MANDATORY_GO_PROPERTIES (TBL_SEEN_ID | TBL_SEEN_GA | TBL_SEEN_CFLAG | TBL_SEEN_HREF)
-
-        // used to delete the GO table entry
-        bool id_only = true;
+        #define MANDATORY_GO_PROPERTIES (MF_SEEN_ID | TBL_SEEN_GA | TBL_SEEN_CFLAG | TBL_SEEN_HREF)
 
         // identify which 'string' memory resource are allocated during the post
 
@@ -482,8 +463,8 @@ static void oc_core_fp_g_post_handler(oc_request_t* request, oc_interface_mask_t
         // set GO id
         tmp_go_entry.id = id;
 
-        // id (0) was already scanned/assigned, see TBL_SEEN_xxx
-        uint16_t member_flags = TBL_SEEN_ID;
+        // id (0) was already scanned/assigned, see TBL_SEEN_*
+        uint16_t member_flags = MF_SEEN_ID;
 
         while (object)
         {
@@ -496,7 +477,7 @@ static void oc_core_fp_g_post_handler(oc_request_t* request, oc_interface_mask_t
             {
               // NOT id (0), for sure from now on a not 'ID only' case,
               // note that id (0) was already scanned/assigned
-              id_only = false;
+              member_flags |= MF_SEEN_OTHER;
             }
 
             // cflags (8)
@@ -512,7 +493,7 @@ static void oc_core_fp_g_post_handler(oc_request_t* request, oc_interface_mask_t
           case OC_REP_STRING:
 
             // any extra element - even if not valid - causes a "not an id only"
-            id_only = false;
+            member_flags |= MF_SEEN_OTHER;
 
             // href (11)
             if (object->iname == 11)
@@ -537,7 +518,7 @@ static void oc_core_fp_g_post_handler(oc_request_t* request, oc_interface_mask_t
           case OC_REP_INT_ARRAY:
 
             // any extra element - even if not valid - causes a "not an id only"
-            id_only = false;
+            member_flags |= MF_SEEN_OTHER;
 
             // ga array (7)
             if (object->iname == 7)
@@ -603,7 +584,7 @@ static void oc_core_fp_g_post_handler(oc_request_t* request, oc_interface_mask_t
             /*
               any other type returns a 4.00, nothing changed
               - an empty array (OC_REP_NIL) on ANY key: a GO needs at least one ga (7), no other member is an array;
-                it is never "id only" (it used to leave 'id_only' true on a key other than 7 -> {0: 1, 11: []} deleted the entry)
+                it is never "id only" (it used to set no MF_SEEN_OTHER on a key other than 7 -> {0: 1, 11: []} deleted the entry)
               - null / undefined (OC_REP_NULL), a type the parser does not map (OC_REP_UNSUPPORTED), bool, ...
             */
             OC_ERR("invalid object type %d (key %d) detected", (int)object->type, (int)object->iname);
@@ -626,7 +607,7 @@ static void oc_core_fp_g_post_handler(oc_request_t* request, oc_interface_mask_t
 
         */
 
-        if (return_status == OC_STATUS_CHANGED && id_only)
+        if (return_status == OC_STATUS_CHANGED && mf_is_id_only(member_flags))
         { // c
 
           // no tmp elements allocated ...
@@ -1093,12 +1074,9 @@ static void oc_core_fp_p_post_handler(oc_request_t* request, oc_interface_mask_t
         }
       }
 
-      // id + ga array (filled or empty) must be present, plus exactly one of ia OR grpid (see a1), see TBL_SEEN_xxx
-      #define MANDATORY_GPT_PROPERTIES (TBL_SEEN_ID | TBL_SEEN_GA)
+      // id + ga array (filled or empty) must be present, plus exactly one of ia OR grpid (see a1), see TBL_SEEN_*
+      #define MANDATORY_GPT_PROPERTIES (MF_SEEN_ID | TBL_SEEN_GA)
       #define TARGET_GPT_PROPERTIES    (TBL_SEEN_IA | TBL_SEEN_GRPID)
-
-      // to delete a PUB table entry
-      bool id_only = true;
 
       // identify which 'string' memory resource are allocated during the post
 
@@ -1108,8 +1086,8 @@ static void oc_core_fp_p_post_handler(oc_request_t* request, oc_interface_mask_t
       // set table id
       tmp_gpt_entry.id = id;
 
-      // id (0) was already scanned/assigned, see TBL_SEEN_xxx
-      uint16_t member_flags = TBL_SEEN_ID;
+      // id (0) was already scanned/assigned, see TBL_SEEN_*
+      uint16_t member_flags = MF_SEEN_ID;
 
       while (object)
       {
@@ -1120,7 +1098,7 @@ static void oc_core_fp_p_post_handler(oc_request_t* request, oc_interface_mask_t
           if (object->iname != 0)
           {
             // NOT an id (0), for sure from now on a not 'ID only' case
-            id_only = false;
+            member_flags |= MF_SEEN_OTHER;
           }
 
           // ia (12) - used on unicast
@@ -1152,7 +1130,7 @@ static void oc_core_fp_p_post_handler(oc_request_t* request, oc_interface_mask_t
         case OC_REP_STRING:
 
           // any extra element - even if not valid - causes a "not an id only"
-          id_only = false;
+          member_flags |= MF_SEEN_OTHER;
 
           // at (14) - used on unicast
           if (object->iname == 14)
@@ -1177,7 +1155,7 @@ static void oc_core_fp_p_post_handler(oc_request_t* request, oc_interface_mask_t
         case OC_REP_INT_ARRAY:
 
           // any extra element - even if not valid - causes a "not an id only"
-          id_only = false;
+          member_flags |= MF_SEEN_OTHER;
 
           // ga array (7)
           if (object->iname == 7)
@@ -1252,7 +1230,7 @@ static void oc_core_fp_p_post_handler(oc_request_t* request, oc_interface_mask_t
           }
 
           // any extra element causes a "not an id only"
-          id_only = false;
+          member_flags |= MF_SEEN_OTHER;
 
           /*
             empty ga array (7) for mc, coded in current CBOR with "OC_REP_NIL"
@@ -1299,7 +1277,7 @@ static void oc_core_fp_p_post_handler(oc_request_t* request, oc_interface_mask_t
 
       */
 
-      if (return_status == OC_STATUS_CHANGED && id_only)
+      if (return_status == OC_STATUS_CHANGED && mf_is_id_only(member_flags))
       { // c
 
         // no tmp elements will be allocated ...
@@ -1695,12 +1673,9 @@ static void oc_core_fp_r_post_handler(oc_request_t* request, oc_interface_mask_t
         // non-confirmable flag for a new entry is init to false ONLY once on creation (not on a possible 'changed' update)
       }
 
-      // id + ga array (filled or empty) must be present, plus exactly one of ia OR grpid (see a1), see TBL_SEEN_xxx
-      #define MANDATORY_GRT_PROPERTIES (TBL_SEEN_ID | TBL_SEEN_GA)
+      // id + ga array (filled or empty) must be present, plus exactly one of ia OR grpid (see a1), see TBL_SEEN_*
+      #define MANDATORY_GRT_PROPERTIES (MF_SEEN_ID | TBL_SEEN_GA)
       #define TARGET_GRT_PROPERTIES    (TBL_SEEN_IA | TBL_SEEN_GRPID)
-
-      // used to delete the RCP table entry
-      bool id_only = true;
 
       // identify which "stack" memory resource are allocated during the post
 
@@ -1710,8 +1685,8 @@ static void oc_core_fp_r_post_handler(oc_request_t* request, oc_interface_mask_t
       // set table id
       tmp_grt_entry.id = id;
 
-      // id (0) was already scanned/assigned, see TBL_SEEN_xxx
-      uint16_t member_flags = TBL_SEEN_ID;
+      // id (0) was already scanned/assigned, see TBL_SEEN_*
+      uint16_t member_flags = MF_SEEN_ID;
 
       while (object)
       {
@@ -1722,7 +1697,7 @@ static void oc_core_fp_r_post_handler(oc_request_t* request, oc_interface_mask_t
           if (object->iname != 0)
           {
             // NOT an id (0), for sure from now on a not 'ID only' case
-            id_only = false;
+            member_flags |= MF_SEEN_OTHER;
           }
 
           // ia (12) - used on unicast
@@ -1754,7 +1729,7 @@ static void oc_core_fp_r_post_handler(oc_request_t* request, oc_interface_mask_t
         case OC_REP_STRING:
 
           // any extra element - even if not valid - causes a "not an id only"
-          id_only = false;
+          member_flags |= MF_SEEN_OTHER;
 
           // at id (14) - used on unicast, see IMPORTANT notes below (in Options)
           if (object->iname == 14)
@@ -1779,7 +1754,7 @@ static void oc_core_fp_r_post_handler(oc_request_t* request, oc_interface_mask_t
         case OC_REP_INT_ARRAY:
 
           // any extra element - even if not valid - causes a "not an id only"
-          id_only = false;
+          member_flags |= MF_SEEN_OTHER;
 
           // ga array (7) - used on multicast
           if (object->iname == 7)
@@ -1854,7 +1829,7 @@ static void oc_core_fp_r_post_handler(oc_request_t* request, oc_interface_mask_t
           }
 
           // any extra element causes a "not an id only"
-          id_only = false;
+          member_flags |= MF_SEEN_OTHER;
 
           /*
             empty ga array (7) for mc, coded in current CBOR with "OC_REP_NIL"
@@ -1877,7 +1852,7 @@ static void oc_core_fp_r_post_handler(oc_request_t* request, oc_interface_mask_t
         case OC_REP_BOOL:
 
           // any extra element - even if not valid - causes a "not an id only"
-          id_only = false;
+          member_flags |= MF_SEEN_OTHER;
 
           // resource 'non' (CBOR/JSON = 'non'/'non') - see 'non' details
           if (oc_string_len(object->name) > 0 && strncmp(oc_string(object->name), "non", 3) == 0)
@@ -1943,7 +1918,7 @@ static void oc_core_fp_r_post_handler(oc_request_t* request, oc_interface_mask_t
 
       */
 
-      if (return_status == OC_STATUS_CHANGED && id_only)
+      if (return_status == OC_STATUS_CHANGED && mf_is_id_only(member_flags))
       { // c
 
         // no tmp elements will be allocated ...
