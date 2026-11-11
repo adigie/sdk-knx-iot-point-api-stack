@@ -5,7 +5,7 @@ Defects in the stack found by its tests that are still open.
 A finding is removed once it is fixed (its test then asserts the corrected
 behaviour) or withdrawn. Numbers are never reused, and tests and comments
 keep citing them: `git log -p -S "F-NNN" -- tests/FINDINGS.md` shows a
-removed entry. The next number is F-071.
+removed entry. The next number is F-072.
 
 ## ~~F-029: `oc_endpoint_print()` frees an uninitialized string for non-IPv6 endpoints~~ - FIXED
 
@@ -504,3 +504,36 @@ removed entry. The next number is F-071.
 - **Evidence:** test below.
 - **Expected:** case (c) looks up the sender context of the token, as (a) and (b) do.
 - **Fix:** case (c) calls `oc_oscore_find_context_by_access_token(..., true)` (sender context only); the comment table of the function says why (RFC 8613 8.4, 5.4; re-add order after POST /auth/at). Tests: `test_oc_oscore_context`, the `OscoreContextByToken` fixture uses a sender context (what protects an own request), `ResponseIsMatchedToTheSenderContextNotACachedRecipientContext` (recipient context of the token first in the list, then the sender context -> the sender context is returned; fails without the fix: the recipient context).
+
+## ~~F-071: a POST /auth/at collection rejected at a later entry leaves an earlier committed token without a sender context~~ - FIXED
+
+- **Files:** `api/oc_knx_sec.c`, `oc_core_auth_at_post_handler()` (per-entry commit inside the collection loop: `oc_oscore_free_contexts_at_id()` on a key change, `*at_entry = tmp`, `oc_store_at_table_entry()`; the early `return` of every 4.00 / 5.00 path; `oc_init_oscore_from_storage(false)` only at the end of the handler); `oc_init_oscore_from_storage()` (the only place that creates persistent sender contexts).
+- **Severity:** Medium - a token updated or created in a rejected collection request can not send (uc, mc, s-mode) until the next successful POST /auth/at, reset or restart; the client is told the request failed although part of it was applied.
+- **Description:**
+  - the handler commits each entry of the collection as soon as its checks pass: on a key change (cnf values or profile differ) the contexts of the token are freed, the entry is replaced and stored
+  - a later entry that fails (mixed array, no id, AT table full, invalid scope or GA array, alg, master secret, id / context id size, missing mandatory properties, out of memory) answers 4.00 / 5.00 and returns at once -> `oc_init_oscore_from_storage(false)` at the end is skipped
+  - the earlier entry is then in the AT table and in storage without a sender context: own requests with that token find no context; a NEW token of an earlier entry never got one
+  - receiving still works: the engine creates a missing recipient context again on the next inbound request
+  - the response is 4.00 / 5.00 although the earlier entries were applied (partial apply, not atomic)
+- **Evidence:** code reading.
+- **Expected:** a rejected collection leaves no token without its contexts and the AT table unchanged (atomic): all entries are checked first and committed only when all passed.
+- **Plan (option B, chosen):**
+  - at most 10 entries per POST /auth/at, EVERY entry counts (id-only deletes too); counted before any entry is processed, more -> 4.13 Request Entity Too Large (RFC 7252 5.9.2.9; spec 2.6.3.3.2: too many elements for the server -> 4.13, the client adapts and resends)
+  - the limit fits the payload: `KNX_PAYLOAD_SIZE` (768 B) holds about 7 typical / 17 minimal full tokens, so a 4.13 is rare
+  - check pass: each entry is parsed into its own shadow copy, kept in a local array of 10 `oc_auth_at_t` on the stack; the first error frees all copies and answers 4.00 / 5.00, nothing is changed
+  - commit pass: only after all entries passed, each copy is committed (contexts freed on a key change, entry replaced, id written, stored); nothing can fail any more (all allocations were done in the check pass)
+  - then `oc_init_oscore_from_storage()` (unless scope only) and the response, as today
+  - same id twice in one request -> 4.00 (spec 2.6.7.2 / 3.5.4.2: the id is unique; spec 3.5.4.1: a new token first, the old one deleted with a subsequent request)
+- **Options considered:**
+
+  | | A: re-init on error | B: atomic with copies (chosen) | C: two passes (check, then parse again and apply) |
+  |---|---|---|---|
+  | contexts after 4.00 | re-built | never lost | never lost |
+  | AT table after 4.00 | partly applied | unchanged | unchanged |
+  | response matches the state | no | yes | yes |
+  | extra RAM | none | 10 copies on the stack | none |
+  | extra CPU | none | none | payload parsed twice |
+  | allocation failure while applying | as today | none, all allocated in the check pass | possible in pass 2, needs A as fallback |
+  | new limit | none | 10 entries -> 4.13 | none |
+
+- **Fix:** option B. `oc_core_auth_at_post_handler()` counts the entries first (more than `AT_POST_MAX_ENTRIES` (10) -> 4.13), then checks each entry into `at_post_entry_t entries[10]` on the stack (shadow copy, allocator bits, delete flag, key-change flag); every error goes through `at_post_reject()` (frees the current and all earlier copies, answers the status) and changes nothing. A duplicate id in the request -> 4.00. Only when all passed, the commit loop deletes / frees the contexts on a key change / replaces the entry / writes the id / stores, then `oc_init_oscore_from_storage()` as before. `find_empty_at_entry(skip)` gives the nth new token of the request the nth free slot (ids are written on commit); the PASE caller passes 0. Tests: `test_oc_knx_sec`, `SecAtPost.CollectionRejectedAtALaterEntryKeepsTheEarlierTokenAndItsContexts` and `CollectionWithMoreThanTenEntriesIsRejectedWith413` (both fail without the fix), `TenNewTokensInOneRequestAreCreatedInTenSlots`, `SameIdTwiceInOneRequestIsRejected`, `DeleteAndRecreateInOneRequestIsRejected`.

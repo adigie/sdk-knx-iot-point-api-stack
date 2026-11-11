@@ -806,6 +806,25 @@ protected:
     }
     return cbor;
   }
+
+  // { 0: entry, 1: entry, ... } from single-entry payloads { 0: entry } (up to 23 entries)
+  static std::vector<uint8_t> make_collection(const std::vector<std::vector<uint8_t>>& singles)
+  {
+    std::vector<uint8_t> cbor = { (uint8_t)(0xa0 + singles.size()) };
+    for (size_t i = 0; i < singles.size(); ++i) {
+      cbor.push_back((uint8_t)i);
+      cbor.insert(cbor.end(), singles[i].begin() + 2, singles[i].end());
+    }
+    return cbor;
+  }
+
+  // full token as make_complete_at_payload(16, false, 1, 10) with the id "to<last>"
+  static std::vector<uint8_t> make_token(char last)
+  {
+    std::vector<uint8_t> cbor = make_complete_at_payload(16, false, 1, 10);
+    cbor[7] = (uint8_t)last;
+    return cbor;
+  }
 };
 
 TEST_F(SecAtPost, CreateWithTooFewPropertiesIsRejected)
@@ -1396,6 +1415,129 @@ TEST_F(SecAtPost, ScopeOnlyUpdateKeepsTheCachedRecipientContext)
 
   uint8_t kid[] = { 0x01 };
   EXPECT_EQ(oc_oscore_find_context_by_kid_and_kid_context(kid, sizeof(kid), nullptr, 0), recipient);
+
+  // the created entry was also stored, keep storage clean for the following tests
+  oc_delete_at_table();
+}
+
+/*
+  a request is applied all or nothing: a later entry that fails leaves an earlier one unchanged
+  - token "tok" with its sender context
+  - POST { tok with a new master secret, new token "tol" with a too short master secret } -> 4.00
+  - "tok" keeps its old master secret and its sender context (the first entry was committed and its contexts freed,
+    the re-initialization at the end was skipped -> the token could not send)
+*/
+TEST_F(SecAtPost, CollectionRejectedAtALaterEntryKeepsTheEarlierTokenAndItsContexts)
+{
+  const std::vector<uint8_t> create = make_complete_at_payload(16, false, 1, 10);
+  ASSERT_EQ(post_at(create.data(), create.size()), oc_status_code(OC_STATUS_CREATED));
+  oc_free_rep(payload);
+  payload = nullptr;
+
+  oc_auth_at_t* e = oc_core_find_at_entry_by_access_token("tok", 3);
+  ASSERT_NE(e, nullptr);
+  ASSERT_NE(oc_oscore_find_context_by_access_token(e, true), nullptr);
+
+  // the 16 ms bytes sit right before cnf:osc:alg (last 2 bytes)
+  std::vector<uint8_t> new_key = make_complete_at_payload(16, false, 1, 10);
+  for (size_t i = new_key.size() - 18; i < new_key.size() - 2; ++i) {
+    new_key[i] = (uint8_t)(new_key[i] + 0x20);
+  }
+  std::vector<uint8_t> short_ms = make_complete_at_payload(15, false);
+  short_ms[7] = 'l';
+
+  const std::vector<uint8_t> cbor = make_collection({ new_key, short_ms });
+  EXPECT_EQ(post_at(cbor.data(), cbor.size()), oc_status_code(OC_STATUS_BAD_REQUEST));
+
+  EXPECT_EQ(oc_core_items_used_in_auth_at_table(), 1);
+  ASSERT_EQ(oc_core_find_at_entry_by_access_token("tok", 3), e);
+  ASSERT_EQ(oc_byte_string_len(e->osc_ms), 16u);
+  EXPECT_EQ((uint8_t)oc_string(e->osc_ms)[0], 0x01);
+  EXPECT_NE(oc_oscore_find_context_by_access_token(e, true), nullptr);
+
+  // the created entry was also stored, keep storage clean for the following tests
+  oc_delete_at_table();
+}
+
+// more than 10 entries in one request -> 4.13 (spec 2.6.3.3.2), every entry counts, nothing is changed
+TEST_F(SecAtPost, CollectionWithMoreThanTenEntriesIsRejectedWith413)
+{
+  std::vector<std::vector<uint8_t>> singles;
+  for (char c = 'a'; c <= 'k'; ++c) {
+    singles.push_back(make_token(c));
+  }
+
+  const std::vector<uint8_t> cbor = make_collection(singles);
+  EXPECT_EQ(post_at(cbor.data(), cbor.size()), oc_status_code(OC_STATUS_REQUEST_ENTITY_TOO_LARGE));
+  EXPECT_EQ(oc_core_items_used_in_auth_at_table(), 0);
+}
+
+// 10 new tokens in one request: each claims its own empty slot (the ids are written only on commit)
+TEST_F(SecAtPost, TenNewTokensInOneRequestAreCreatedInTenSlots)
+{
+  std::vector<std::vector<uint8_t>> singles;
+  for (char c = 'a'; c <= 'j'; ++c) {
+    singles.push_back(make_token(c));
+  }
+
+  const std::vector<uint8_t> cbor = make_collection(singles);
+  EXPECT_EQ(post_at(cbor.data(), cbor.size()), oc_status_code(OC_STATUS_CREATED));
+  EXPECT_EQ(oc_core_items_used_in_auth_at_table(), 10);
+  for (char c = 'a'; c <= 'j'; ++c) {
+    const char id[] = { 't', 'o', c };
+    EXPECT_NE(oc_core_find_at_entry_by_access_token(id, sizeof(id)), nullptr) << c;
+  }
+
+  // the created entries were also stored, keep storage clean for the following tests
+  oc_delete_at_table();
+}
+
+/*
+  the same id twice in one request -> 4.00 (spec 2.6.7.2: the id is unique), nothing is changed
+  - token "tok" exists; POST { tok with a new master secret, { 0: "tok", 9: [2] } }
+  - "tok" keeps its old master secret and its string scope
+*/
+TEST_F(SecAtPost, SameIdTwiceInOneRequestIsRejected)
+{
+  const std::vector<uint8_t> create = make_complete_at_payload(16, false, 1, 10);
+  ASSERT_EQ(post_at(create.data(), create.size()), oc_status_code(OC_STATUS_CREATED));
+  oc_free_rep(payload);
+  payload = nullptr;
+
+  std::vector<uint8_t> new_key = make_complete_at_payload(16, false, 1, 10);
+  for (size_t i = new_key.size() - 18; i < new_key.size() - 2; ++i) {
+    new_key[i] = (uint8_t)(new_key[i] + 0x20);
+  }
+  const std::vector<uint8_t> scope_ga = { 0xa1, 0x00, 0xa2, 0x00, 0x63, 't', 'o', 'k', 0x09, 0x81, 0x02 };
+
+  const std::vector<uint8_t> cbor = make_collection({ new_key, scope_ga });
+  EXPECT_EQ(post_at(cbor.data(), cbor.size()), oc_status_code(OC_STATUS_BAD_REQUEST));
+
+  EXPECT_EQ(oc_core_items_used_in_auth_at_table(), 1);
+  const oc_auth_at_t* e = oc_core_find_at_entry_by_access_token("tok", 3);
+  ASSERT_NE(e, nullptr);
+  EXPECT_NE(e->scope, OC_ACL_GA);
+  EXPECT_EQ(e->ga_len, 0);
+  ASSERT_EQ(oc_byte_string_len(e->osc_ms), 16u);
+  EXPECT_EQ((uint8_t)oc_string(e->osc_ms)[0], 0x01);
+
+  // the created entry was also stored, keep storage clean for the following tests
+  oc_delete_at_table();
+}
+
+// delete and re-create of the same id in one request -> 4.00 (spec 3.5.4.1: separate requests), the token stays
+TEST_F(SecAtPost, DeleteAndRecreateInOneRequestIsRejected)
+{
+  const std::vector<uint8_t> create = make_complete_at_payload(16, false, 1, 10);
+  ASSERT_EQ(post_at(create.data(), create.size()), oc_status_code(OC_STATUS_CREATED));
+  oc_free_rep(payload);
+  payload = nullptr;
+
+  const std::vector<uint8_t> delete_tok = { 0xa1, 0x00, 0xa1, 0x00, 0x63, 't', 'o', 'k' };
+  const std::vector<uint8_t> cbor = make_collection({ delete_tok, create });
+  EXPECT_EQ(post_at(cbor.data(), cbor.size()), oc_status_code(OC_STATUS_BAD_REQUEST));
+  EXPECT_EQ(oc_core_items_used_in_auth_at_table(), 1);
+  EXPECT_NE(oc_core_find_at_entry_by_access_token("tok", 3), nullptr);
 
   // the created entry was also stored, keep storage clean for the following tests
   oc_delete_at_table();

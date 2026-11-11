@@ -1,8 +1,8 @@
 # KNX IoT Point API Stack - Test Catalog
 
 > **1913 unit tests** on `linux-test-asan` (63 files in `tests/unit/`, counted by CTest on 2026-11-09, including the
-> `test_dns_sd_mdns.cpp` cases registered under `if(UNIX)` only) and **293 runtime tests** (20 files in `tests/runtime/`, collected
-> on 2026-11-09).
+> `test_dns_sd_mdns.cpp` cases registered under `if(UNIX)` only) and **295 runtime tests** (20 files in `tests/runtime/`, collected
+> on 2026-11-11).
 > The conformance tier is not listed here: the test tool
 > (`tests/iot-test-tool/`) generates it from KNX's conformance-test template,
 > one item per template sequence, with this stack's override files in
@@ -331,7 +331,7 @@ OSCORE Option (48 tests)
 
 ---
 
-### test_oc_knx_sec.cpp — Security Credentials (99 tests)
+### test_oc_knx_sec.cpp — Security Credentials (104 tests)
 
 **Source:** `api/oc_knx_sec.c`; linked with `-Wl,--wrap=oc_core_get_core_resource_by_index` (counts the lookups of the list GETs, pass through)
 
@@ -345,7 +345,7 @@ OSCORE Option (48 tests)
 | `AtSsnStorage` | 2 | SSN persistence round-trip; entry outside the table is skipped |
 | `SecHandlers` | 24 | CoAP handlers of `/auth`, `/auth/o`, `/auth/o/osndelay`, `/auth/o/replwdo`, `/auth/at`, `/auth/at/*`: `DELETE /auth/at/{id}` ends the token's `/k` subscriptions (`AtEntryDeleteRemovesTheTokensObservers`); wrong-Accept rejection, invalid paging (`ps=0`, `pn=-1`), CBOR GET payloads, OSN-delay PUT (no payload → 4.00, valid → 4.04 CHANGED), AT-table DELETE, wildcard entry lookup (missing/unknown token → 4.00); the `/auth/o` and `/auth` list GETs (`AuthOListWalksTheCoreChainOnce`, `AuthListWalksTheCoreChainOnce`) answer 2.05 with their first entry and the one after it and walk the core resource chain once (one lookup by index) |
 | `SecAcl` | 29 | `oc_knx_sec_check_acl`, the authorization gate, each case with its exact status (`OC_STATUS_OK`, 4.01 `UNAUTHORIZED` not decrypted, 4.03 `FORBIDDEN` scope / ga not covered, 4.05 `METHOD_NOT_ALLOWED` no handler slot): NULL resource and unsupported method → 4.05; per-method handler scope resolution (GET/POST/PUT/DELETE); OSCORE requirement (`OSCORE` alone and `OSCORE_DECRYPTED` alone both denied); scope matching (disjoint → deny, partial overlap → allow, missing access token → deny); `<ga>` per-group-address authorization incl. empty/NULL ga list, absent ga in payload, non-object payload, first/last list entry, broadcast address, and the F-026 regression (a foreign ga anywhere in the payload denies, in either order) |
-| `SecAtPost` | 20 | `/auth/at` rejects incomplete or malformed credentials: id + one scope, repeated mandatory property, short/all-zero master secret, and sender ID longer than the OSCORE limit; `cnf:osc:alg` 10 creates the token, any other value is rejected and not stored; a rejected scope update (`["if.unknown"]`) leaves an existing `<ga>` token unchanged; a `<ga>`-only update (2.04) keeps the OSCORE contexts (same context, SSN unchanged); an id-only delete in a scope-only request frees the deleted token's context; a profile + scope update re-initializes the contexts; deleting an entry (device reset path) frees its sender and recipient contexts; an update rejected after a valid `<ga>` scope or a valid master secret leaves the token unchanged; a repeated master secret in a full-token overwrite keeps the last one; a repeated scope `<ga>` then string frees both ga arrays (request and live); a full-token overwrite with a new master secret frees the token's cached recipient context, one with the same key keeps it (the response of a request protected with this token still gets encrypted); a partial update carrying `cnf` is rejected with 4.00 (spec 2.6.7.3) and keeps the old key and context; a scope-only update keeps the cached recipient context |
+| `SecAtPost` | 25 | `/auth/at` rejects incomplete or malformed credentials: id + one scope, repeated mandatory property, short/all-zero master secret, and sender ID longer than the OSCORE limit; `cnf:osc:alg` 10 creates the token, any other value is rejected and not stored; a rejected scope update (`["if.unknown"]`) leaves an existing `<ga>` token unchanged; a `<ga>`-only update (2.04) keeps the OSCORE contexts (same context, SSN unchanged); an id-only delete in a scope-only request frees the deleted token's context; a profile + scope update re-initializes the contexts; deleting an entry (device reset path) frees its sender and recipient contexts; an update rejected after a valid `<ga>` scope or a valid master secret leaves the token unchanged; a repeated master secret in a full-token overwrite keeps the last one; a repeated scope `<ga>` then string frees both ga arrays (request and live); a full-token overwrite with a new master secret frees the token's cached recipient context, one with the same key keeps it (the response of a request protected with this token still gets encrypted); a partial update carrying `cnf` is rejected with 4.00 (spec 2.6.7.3) and keeps the old key and context; a scope-only update keeps the cached recipient context; a collection is atomic: one rejected later entry leaves the earlier token, its key and its sender context unchanged; more than 10 entries -> 4.13 (spec 2.6.3.3.2), 10 new tokens in one request land in 10 slots; the same id twice in one request (also delete and re-create) -> 4.00, nothing changed (spec 2.6.7.2, 3.5.4.1) |
 | `AtTable` access token lookup | 2 | `oc_core_find_at_entry_by_access_token`: match, miss, prefix/longer id; empty or NULL id never matches an unused slot |
 
 ---
@@ -1743,7 +1743,7 @@ Measured link-format sizes at `KNX_PAYLOAD_SIZE` 768 (512-byte blocks):
 
 ---
 
-### test_security.py — Security & OSCORE (72 tests, 79 collected)
+### test_security.py — Security & OSCORE (74 tests, 81 collected)
 
 | Class | Test | Overlaps | What it checks |
 |-------|------|----------|----------------|
@@ -1754,6 +1754,8 @@ Measured link-format sizes at `KNX_PAYLOAD_SIZE` 768 (512-byte blocks):
 |  | `test_overwrite_existing_at` | 5.3.8.4 | POST /auth/at with same id but new scope overwrites entry. |
 |  | `test_create_multiple_ats_single_write` | 5.3.8.5 | POST /auth/at with array of 2 ATs → 2.01. |
 |  | `test_update_multiple_ats` | 5.3.8.6 | POST /auth/at to update 2 existing ATs → 2.04. |
+| **TestWriteAccessTokenEntryLimit** | `test_more_than_ten_tokens_in_one_post_returns_413` |  | POST /auth/at with 11 ATs (payload below one block) -> 4.13 from the handler (spec 2.6.3.3.2), none of them stored. |
+|  | `test_ten_tokens_in_one_post_are_accepted` |  | POST /auth/at with 10 ATs (the limit) -> 2.01, all 10 stored. |
 | **TestWriteAccessTokenMandatoryProperties** | `test_at_mandatory_create_with_id_only_rejected` |  | POST /auth/at with only the id -> 4.00, no entry created. |
 |  | `test_at_mandatory_create_without_scope_rejected` |  | POST /auth/at without scope (9) -> 4.00, no entry created. |
 |  | `test_at_mandatory_create_without_sender_id_rejected` |  | POST /auth/at without cnf:osc:id (8:4:0) -> 4.00, no entry. |

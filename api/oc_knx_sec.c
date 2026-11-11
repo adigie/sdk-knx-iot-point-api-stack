@@ -442,15 +442,28 @@ void oc_free_at_table_ram(void)
 
 /*
   empty ... when 'id' string is an empty string ""
-  the returned entry wipes the at-table RAM content (but not the storage), a free RAM at-table slot
-  may still carry leftovers (salt, context id, ga) of a beforehand rejected entry
+  - the returned entry wipes the at-table RAM content (but not the storage), a free RAM at-table slot
+    may still carry leftovers (salt, context id, ga) of a beforehand rejected entry
+
+  skip
+  - how many free slots must be skipped to really guarantee that we have enough and find the correct position for a later assign
+  - on scanning we always find the first free slot and assume all is OK (but later on commit all new tokens land in that one slot)
+  - without skip, all new tokens of one request get the SAME slot and the commit writes them all into it (last wins)
+  - 'skip--' counts empty slots only ('&&' short-circuits), the n-th new token gets the n-th empty slot
+    example: tokens A (slot 0) and B (slot 2) in the table, one request with 3 new tokens X, Y, Z
+
+      slot      :  0     1     2     3     4
+      id        : "A"   ""    "B"   ""    ""
+      X, skip 0 :        X                       -> first empty slot
+      Y, skip 1 :                    Y           -> passes slot 1 (claimed by X)
+      Z, skip 2 :                          Z     -> passes slots 1 and 3 (claimed by X and Y)
 */
-static oc_auth_at_t* find_empty_at_entry(void)
+static oc_auth_at_t* find_empty_at_entry(int skip)
 {
 
   for (oc_auth_at_t* entry = g_at_entries; entry < g_at_entries + KNX_ATT_MAX_ENTRIES; entry++)
   {
-    if (oc_string_len(entry->id) == 0)
+    if (oc_string_len(entry->id) == 0 && skip-- == 0)
     {
       // found an empty 'id' string ... reset the remaining content before handing the slot out (double free of id accepted)
       oc_free_at_table_entry_ram(entry);
@@ -692,6 +705,36 @@ static void oc_free_allocated_at_elements(oc_auth_at_t* entry, uint8_t allocator
   }
 }
 
+// entries of one POST /auth/at request that are checked into shadow copies on the stack, more -> 4.13
+#define AT_POST_MAX_ENTRIES 10
+
+// one checked entry of a POST /auth/at request, committed only when ALL entries of the request passed
+typedef struct
+{
+  oc_auth_at_t tmp;           // shadow copy with the new values
+  oc_auth_at_t* at_entry;     // live slot: the existing token, or the empty slot claimed for a new one
+  const oc_string_t* id;      // access token id, points into the request payload
+  uint8_t allocator;          // AT_ALLOC_* elements owned by 'tmp'
+  bool delete_entry;          // case c: id only on an existing token
+  bool free_contexts;         // the key (cnf values or profile) changed -> the contexts of the token are freed on commit
+} at_post_entry_t;
+
+/*
+  a rejected POST /auth/at changes nothing
+  - releases the current entry and the shadow copies of all older entries checked before, responds the error
+*/
+static void at_post_reject(oc_request_t* request, at_post_entry_t* entries, int entry_count, oc_auth_at_t* tmp, uint8_t allocator, oc_status_t error)
+{
+  // current 
+  oc_free_allocated_at_elements(tmp, allocator);
+
+  for (int i = 0; i < entry_count; i++)
+  { // older
+    oc_free_allocated_at_elements(&entries[i].tmp, entries[i].allocator);
+  }
+  oc_prepare_no_format_response_no_payload(request, error);
+}
+
 static void oc_core_auth_at_post_handler(oc_request_t* request, oc_interface_mask_t iface_mask, void* data)
 {
   (void)data;
@@ -709,6 +752,17 @@ static void oc_core_auth_at_post_handler(oc_request_t* request, oc_interface_mas
   bool other_updated = false;
 
   oc_auth_at_t* at_entry = NULL;
+
+  /*
+    a request is applied ALL or NOTHING (atomic)
+    - check pass -> each entry is checked into its own shadow copy in 'entries', the first error frees all copies -> 4.00/5.00,
+      the AT table and the OSCORE contexts stay as they were
+    - commit pass -> only when ALL entries passed, nothing can fail there (all values were allocated in the check pass)
+    -> a rejected request never leaves an earlier entry committed (its contexts freed, but not re-initialized)
+  */
+  at_post_entry_t entries[AT_POST_MAX_ENTRIES];
+  int entry_count = 0; // number of entries checked into shadow copies, committed only when ALL entries passed
+  int new_tokens = 0;  // empty slots claimed by new tokens of this request
   OC_INF("oc_core_auth_at_post_handler");
 
   if (!oc_accept_header_is_ok(request, APPLICATION_CBOR))
@@ -718,6 +772,27 @@ static void oc_core_auth_at_post_handler(oc_request_t* request, oc_interface_mas
 
   // debugging
   oc_print_rep_as_json(request->request_payload, true);
+
+  /*
+    every entry counts (also an id-only delete), counted before any entry is checked
+    - spec 2.6.3.3.2 / RFC 7252 5.9.2.9: more elements than the server handles -> 4.13, the client splits the request
+    - the payload (KNX_PAYLOAD_SIZE) holds about 7 typical / 17 minimal full tokens anyway
+  */
+  int entries_in_request = 0;
+  for (const oc_rep_t* entry_rep = request->request_payload; entry_rep != NULL; entry_rep = entry_rep->next)
+  {
+    if (entry_rep->type == OC_REP_OBJECT)
+    {
+      entries_in_request++;
+    }
+  }
+
+  if (entries_in_request > AT_POST_MAX_ENTRIES)
+  {
+    OC_ERR("%d access tokens in one request, max %d", entries_in_request, AT_POST_MAX_ENTRIES);
+    oc_prepare_no_format_response_no_payload(request, OC_STATUS_REQUEST_ENTITY_TOO_LARGE);
+    return;
+  }
 
   // set ptr to collection of 1...n access token entries in payload
   rep = request->request_payload;
@@ -736,7 +811,7 @@ static void oc_core_auth_at_post_handler(oc_request_t* request, oc_interface_mas
         if (object->type == OC_REP_MIXED_ARRAY)
         {
           OC_WRN("mixed array as scope is not allowed!");
-          oc_prepare_no_format_response_no_payload(request, OC_STATUS_BAD_REQUEST);
+          at_post_reject(request, entries, entry_count, NULL, 0, OC_STATUS_BAD_REQUEST);
           return;
         }
 
@@ -755,8 +830,29 @@ static void oc_core_auth_at_post_handler(oc_request_t* request, oc_interface_mas
       if (access_token_id == NULL)
       {
         OC_ERR("Access token ID in payload not found!");
-        oc_prepare_no_format_response_no_payload(request, OC_STATUS_BAD_REQUEST);
+        at_post_reject(request, entries, entry_count, NULL, 0, OC_STATUS_BAD_REQUEST);
         return;
+      }
+
+      /*
+        the same id twice in one request -> 4.00
+        
+        - spec 2.6.7.2 / 3.5.4.2 : the id SHALL be unique on the device; 
+        - spec 3.5.4.1           : a new token first, the old one deleted with a SUBSEQUENT request
+        
+        - the ids are written on commit only, the table lookup below does not see the earlier entries of this request
+          -> a second create would claim a second slot (the id twice in the table), a second update would build on the live
+             values the first one replaces on commit (freed)
+      */
+      for (int i = 0; i < entry_count; i++)
+      {
+        if (oc_string_len(*entries[i].id) == oc_string_len(*access_token_id)
+            && memcmp(oc_string(*entries[i].id), oc_string(*access_token_id), oc_string_len(*access_token_id)) == 0)
+        {
+          OC_ERR("access token %s twice in the same request", oc_string_checked(*access_token_id));
+          at_post_reject(request, entries, entry_count, NULL, 0, OC_STATUS_BAD_REQUEST);
+          return;
+        }
       }
 
       // find index from access token table
@@ -773,14 +869,15 @@ static void oc_core_auth_at_post_handler(oc_request_t* request, oc_interface_mas
         // no index, so we will create one
         return_status = OC_STATUS_CREATED;
 
-        // no index, so we will create one (default)
-        at_entry = find_empty_at_entry();
+        // no index, so we will create one (default), the slots claimed by earlier new tokens of this request are skipped
+        at_entry = find_empty_at_entry(new_tokens);
         if (!at_entry)
         {
           OC_ERR("AT table has no empty slot to add a new entry!");
-          oc_prepare_no_format_response_no_payload(request, OC_STATUS_BAD_REQUEST);
+          at_post_reject(request, entries, entry_count, NULL, 0, OC_STATUS_BAD_REQUEST);
           return;
         }
+        new_tokens++;
       }
 
       /*
@@ -856,8 +953,7 @@ static void oc_core_auth_at_post_handler(oc_request_t* request, oc_interface_mas
             if (acl_scopes == OC_ACL_NONE)
             {
               OC_ERR("No valid access scope was set!");
-              oc_free_allocated_at_elements(&tmp, allocator);
-              oc_prepare_no_format_response_no_payload(request, OC_STATUS_BAD_REQUEST);
+              at_post_reject(request, entries, entry_count, &tmp, allocator, OC_STATUS_BAD_REQUEST);
               return;
             }
 
@@ -895,8 +991,7 @@ static void oc_core_auth_at_post_handler(oc_request_t* request, oc_interface_mas
             if (array_size == 0)
             {
               OC_ERR("No valid access GA scope was set!");
-              oc_free_allocated_at_elements(&tmp, allocator);
-              oc_prepare_no_format_response_no_payload(request, OC_STATUS_BAD_REQUEST);
+              at_post_reject(request, entries, entry_count, &tmp, allocator, OC_STATUS_BAD_REQUEST);
               return;
             }
 
@@ -904,8 +999,7 @@ static void oc_core_auth_at_post_handler(oc_request_t* request, oc_interface_mas
             if (!new_array)
             {
               OC_ERR("Out of stack memory!");
-              oc_free_allocated_at_elements(&tmp, allocator);
-              oc_prepare_no_format_response_no_payload(request, OC_STATUS_INTERNAL_SERVER_ERROR);
+              at_post_reject(request, entries, entry_count, &tmp, allocator, OC_STATUS_INTERNAL_SERVER_ERROR);
               return;
             }
 
@@ -1000,8 +1094,7 @@ static void oc_core_auth_at_post_handler(oc_request_t* request, oc_interface_mas
                     if (oscore_object->value.integer != 10)
                     {
                       OC_ERR("algorithm is not 10 : %d", (int)oscore_object->value.integer);
-                      oc_free_allocated_at_elements(&tmp, allocator);
-                      oc_prepare_no_format_response_no_payload(request, OC_STATUS_BAD_REQUEST);
+                      at_post_reject(request, entries, entry_count, &tmp, allocator, OC_STATUS_BAD_REQUEST);
                       return;
                     }
 
@@ -1021,8 +1114,7 @@ static void oc_core_auth_at_post_handler(oc_request_t* request, oc_interface_mas
                     if (mastersecret_size < OSCORE_KEY_LEN || mastersecret_size > OSCORE_MASTER_SECRET_LEN)
                     {
                       OC_ERR("master secret size must be in range 16 ... 32: %u", mastersecret_size);
-                      oc_free_allocated_at_elements(&tmp, allocator);
-                      oc_prepare_no_format_response_no_payload(request, OC_STATUS_BAD_REQUEST);
+                      at_post_reject(request, entries, entry_count, &tmp, allocator, OC_STATUS_BAD_REQUEST);
                       return;
                     }
 
@@ -1031,8 +1123,7 @@ static void oc_core_auth_at_post_handler(oc_request_t* request, oc_interface_mas
                     {
 
                       OC_ERR("master secret with len %u content cannot be zero : ", mastersecret_size);
-                      oc_free_allocated_at_elements(&tmp, allocator);
-                      oc_prepare_no_format_response_no_payload(request, OC_STATUS_BAD_REQUEST);
+                      at_post_reject(request, entries, entry_count, &tmp, allocator, OC_STATUS_BAD_REQUEST);
                       return;
                     }
 
@@ -1057,8 +1148,7 @@ static void oc_core_auth_at_post_handler(oc_request_t* request, oc_interface_mas
                     if (id_context_size > OSCORE_ID_CONTEXT_LEN)
                     {
                       OC_ERR("id context size to big : %zu", id_context_size);
-                      oc_free_allocated_at_elements(&tmp, allocator);
-                      oc_prepare_no_format_response_no_payload(request, OC_STATUS_BAD_REQUEST);
+                      at_post_reject(request, entries, entry_count, &tmp, allocator, OC_STATUS_BAD_REQUEST);
                       return;
                     }
 
@@ -1080,8 +1170,7 @@ static void oc_core_auth_at_post_handler(oc_request_t* request, oc_interface_mas
                     if (sender_id_size > OSCORE_SENDER_ID_LEN)
                     {
                       OC_ERR("sender id size to big : %zu", sender_id_size);
-                      oc_free_allocated_at_elements(&tmp, allocator);
-                      oc_prepare_no_format_response_no_payload(request, OC_STATUS_BAD_REQUEST);
+                      at_post_reject(request, entries, entry_count, &tmp, allocator, OC_STATUS_BAD_REQUEST);
                       return;
                     }
 
@@ -1135,28 +1224,27 @@ static void oc_core_auth_at_post_handler(oc_request_t* request, oc_interface_mas
       */
       if (return_status == OC_STATUS_CHANGED && id_only)
       {
-        // c
+        // c, deleted on commit
         OC_DBG("only found id in request, deleting entry...");
-        oc_delete_at_table_entry(at_entry);
+        entries[entry_count++] = (at_post_entry_t){ .at_entry = at_entry, .id = access_token_id, .delete_entry = true };
       }
       else if ((return_status == OC_STATUS_CREATED || at_properties_seen & AT_PROP_CNF) &&
                (at_properties_seen & MANDATORY_AT_PROPERTIES) != MANDATORY_AT_PROPERTIES)
       {
         // a + e
         OC_WRN("mandatory items missing, entry not created / cnf not updated");
-        oc_free_allocated_at_elements(&tmp, allocator);
-        oc_prepare_no_format_response_no_payload(request, OC_STATUS_BAD_REQUEST);
+        at_post_reject(request, entries, entry_count, &tmp, allocator, OC_STATUS_BAD_REQUEST);
         return;
       }
       else
       {
-        // b + d
+        // b + d, committed after ALL entries passed
         OC_DBG("storage index: %d (%s) ", (int)(at_entry - g_at_entries), oc_string_checked(*access_token_id));
 
         /*
           an existing token rewritten (= CHANGED) with a NEW key (cnf values or profile differ from the live entry)
 
-          1. oc_oscore_free_contexts_at_id() below frees ALL its contexts (sender and recipient), only when the key differs
+          1. oc_oscore_free_contexts_at_id() on commit frees ALL its contexts (sender and recipient), only when the key differs
           2. oc_init_oscore_from_storage() at the end rebuilds only the sender contexts, a recipient context is created again
              from the new key on the next inbound request
 
@@ -1171,31 +1259,48 @@ static void oc_core_auth_at_post_handler(oc_request_t* request, oc_interface_mas
           - the VALUES are compared, not the elements seen: a full token re-POSTed with the same key (conformance 5.3.8.4,
             and 5.10.5.2 protected with this token itself) keeps its contexts (a), such a request still gets its response
         */
-        if (return_status == OC_STATUS_CHANGED && (tmp.profile != at_entry->profile
+        const bool key_changed = return_status == OC_STATUS_CHANGED && (tmp.profile != at_entry->profile
                       || (at_properties_seen & AT_PROP_CNF
                       && (oc_byte_string_cmp(tmp.osc_id, at_entry->osc_id) != 0
                           || oc_byte_string_cmp(tmp.osc_ms, at_entry->osc_ms) != 0
                           || oc_byte_string_cmp(tmp.osc_salt, at_entry->osc_salt) != 0
-                          || oc_byte_string_cmp(tmp.osc_contextid, at_entry->osc_contextid) != 0))))
-        {
-          oc_oscore_free_contexts_at_id(at_entry);
-        }
+                          || oc_byte_string_cmp(tmp.osc_contextid, at_entry->osc_contextid) != 0)));
 
-        // all checks passed: release the replaced values of the live entry, then take over the shadow copy
-        oc_free_allocated_at_elements(at_entry, allocator);
-        *at_entry = tmp;
-
-        // all checks passed, only now the entry gets its id and becomes visible in the AT table
-        oc_free_string(&at_entry->id);
-        oc_new_string(&at_entry->id, oc_string(*access_token_id), oc_string_len(*access_token_id));
-
-        // debugging
-        oc_print_auth_at_entry(at_entry);
-        oc_store_at_table_entry(at_entry);
+        entries[entry_count++] = (at_post_entry_t){ .tmp = tmp, .at_entry = at_entry, .id = access_token_id, .allocator = allocator,
+                                                    .free_contexts = key_changed };
       }
     }
 
     rep = rep->next;
+  }
+
+  // all entries passed -> commit them in request order, nothing can fail from here on
+  for (at_post_entry_t* pending = entries; pending < entries + entry_count; pending++)
+  {
+    if (pending->delete_entry)
+    {
+      oc_delete_at_table_entry(pending->at_entry);
+    }
+    else
+    {
+      if (pending->free_contexts)
+      {
+        oc_oscore_free_contexts_at_id(pending->at_entry);
+      }
+
+      // release the replaced values of the live entry, then take over the shadow copy
+      oc_free_allocated_at_elements(pending->at_entry, pending->allocator);
+
+      *pending->at_entry = pending->tmp;
+
+      // only now the entry gets its id and becomes visible in the AT table
+      oc_free_string(&pending->at_entry->id);
+      oc_new_string(&pending->at_entry->id, oc_string(*pending->id), oc_string_len(*pending->id));
+
+      // debugging
+      oc_print_auth_at_entry(pending->at_entry);
+      oc_store_at_table_entry(pending->at_entry);
+    }
   }
 
   /*
@@ -1220,7 +1325,7 @@ static void oc_core_auth_at_post_handler(oc_request_t* request, oc_interface_mas
 
   // the last return status from a collection with 'n' POST elements is responded (CREATED/CHANGED)
   oc_prepare_no_format_response_no_payload(request, return_status);
-  OC_INF("oc_core_auth_at_post_handler - end"); 
+  OC_INF("oc_core_auth_at_post_handler - end");
 }
 
 static void oc_core_auth_at_delete_handler(oc_request_t* request, oc_interface_mask_t iface_mask, void* data)
@@ -2012,7 +2117,7 @@ void oc_oscore_set_auth_shared(const char* client_sender_id, int client_sender_i
   if (!at_entry)
   {
     // no pase token present in AT table (normal case)
-    at_entry = find_empty_at_entry();
+    at_entry = find_empty_at_entry(0);
   }
 
   if (!at_entry)
