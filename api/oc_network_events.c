@@ -22,8 +22,8 @@ OC_LIST(network_events);
  * Only the last event is delivered, it is the state the interface is in. Delivering every event in
  * a fixed order could end a burst with "down" while the interface is up.
  */
-static bool interface_event_pending;
-static oc_interface_event_t interface_event;
+// NETWORK_INTERFACE_NO_EVENT: no event pending (explicit, a zero-initialised value would be NETWORK_INTERFACE_DOWN)
+static oc_interface_event_t interface_event = NETWORK_INTERFACE_NO_EVENT;
 
 /* Network state
  * The last state a port reported: at least one usable IPv6 address, and a hash of the addresses.
@@ -76,13 +76,13 @@ static void oc_process_network_event(void)
       -> without the own poll the pending event would wait for the next network activity, maybe forever
     - a newer event reported in between replaces it, the last one wins
   */
-  if (interface_event_pending)
+  if (interface_event != NETWORK_INTERFACE_NO_EVENT)
   {
     const oc_process_event_t ev = (interface_event == NETWORK_INTERFACE_UP) ? oc_events[INTERFACE_UP] : oc_events[INTERFACE_DOWN];
     if (oc_process_post(&oc_network_events, ev, NULL) == OC_PROCESS_ERR_OK)
     {
       // queued -> no longer pending
-      interface_event_pending = false;
+      interface_event = NETWORK_INTERFACE_NO_EVENT;
     }
     else
     {
@@ -141,16 +141,6 @@ void oc_network_event(oc_message_t* message)
   _oc_signal_event_loop();
 }
 
-/* Pending interface event setter
- * Sets the pending interface event, the caller holds the network event mutex.
- */
-static void set_pending_interface_event(oc_interface_event_t event)
-{
-  // the last event of a burst wins, see the pending interface event above
-  interface_event = event;
-  interface_event_pending = true;
-}
-
 void oc_network_interface_event(oc_interface_event_t event)
 {
   if (!oc_process_is_running(&oc_network_events) || (event != NETWORK_INTERFACE_DOWN && event != NETWORK_INTERFACE_UP))
@@ -158,8 +148,9 @@ void oc_network_interface_event(oc_interface_event_t event)
     return;
   }
 
+  // the last event of a burst wins, see the pending interface event above
   oc_network_event_handler_mutex_lock();
-  set_pending_interface_event(event);
+  interface_event = event;
   oc_network_event_handler_mutex_unlock();
 
   oc_process_poll(&oc_network_events);
@@ -229,7 +220,8 @@ bool knx_network_report_state(bool up, uint32_t addresses_hash)
 
     if (event_loop_running)
     {
-      set_pending_interface_event(up ? NETWORK_INTERFACE_UP : NETWORK_INTERFACE_DOWN);
+      // the last event of a burst wins, see the pending interface event above
+      interface_event = up ? NETWORK_INTERFACE_UP : NETWORK_INTERFACE_DOWN;
     }
   }
 

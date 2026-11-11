@@ -25,13 +25,13 @@ extern "C" {
  *
  */
 typedef enum {
-  NETWORK_INTERFACE_DOWN, /**< network interface down */
-  NETWORK_INTERFACE_UP    /**< network interface up */
+  NETWORK_INTERFACE_DOWN,    /**< network interface down */
+  NETWORK_INTERFACE_UP,      /**< network interface up */
+  NETWORK_INTERFACE_NO_EVENT /**< no event (stack-internal: no event pending), never passed to a callback, ignored by oc_network_interface_event() */
 } oc_interface_event_t;
 
 /**
-  @brief Callback function to pass the network interface up/down infomation
-    to App.
+  @brief Callback function to pass the network interface up/down information.
   @param event  enum values in oc_interface_event_t.
 */
 typedef void (*interface_event_handler_t)(oc_interface_event_t event);

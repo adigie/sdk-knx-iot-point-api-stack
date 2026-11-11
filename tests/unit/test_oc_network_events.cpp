@@ -207,6 +207,32 @@ TEST_F(NetworkEvents, UnknownInterfaceEventIsIgnored)
   EXPECT_EQ(g_signal_events, 0);
 }
 
+/*
+  NETWORK_INTERFACE_NO_EVENT marks "no event pending" inside the stack, from outside it is ignored
+  - it wakes nothing and dispatches nothing
+  - it does not clear an event that is already pending: up, then NO_EVENT -> up is dispatched
+*/
+TEST_F(NetworkEvents, NoEventInterfaceEventIsIgnoredAndKeepsThePendingEvent)
+{
+  g_interface_events = 0;
+  g_last_interface_event = (oc_interface_event_t)99;
+  g_signal_events = 0;
+
+  oc_network_interface_event(NETWORK_INTERFACE_NO_EVENT);
+  EXPECT_EQ(g_signal_events, 0);
+  oc_process_run();
+  oc_process_run();
+  EXPECT_EQ(g_interface_events, 0);
+
+  oc_network_interface_event(NETWORK_INTERFACE_UP);
+  oc_network_interface_event(NETWORK_INTERFACE_NO_EVENT);
+  EXPECT_EQ(g_signal_events, 1);
+  oc_process_run();
+  oc_process_run();
+  EXPECT_EQ(g_interface_events, 1);
+  EXPECT_EQ(g_last_interface_event, NETWORK_INTERFACE_UP);
+}
+
 // The address hash does not depend on the order of the endpoint list, another
 // address set gives another hash, a list without addresses gives 0.
 TEST_F(NetworkEvents, AddressesHashIgnoresTheListOrder)
