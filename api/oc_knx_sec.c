@@ -747,9 +747,8 @@ static void oc_core_auth_at_post_handler(oc_request_t* request, oc_interface_mas
   // default assumption
   oc_status_t return_status = OC_STATUS_BAD_REQUEST;
 
-  // global flags to indicate if scope or other properties were updated over an entire collection
-  bool scope_updated = false;
-  bool other_updated = false;
+  // any token of the request carries key material (cnf:osc members or profile) -> the OSCORE contexts are re-initialized
+  bool key_material_updated = false;
 
   oc_auth_at_t* at_entry = NULL;
 
@@ -968,8 +967,6 @@ static void oc_core_auth_at_post_handler(oc_request_t* request, oc_interface_mas
             tmp.ga_len = 0;
             allocator |= AT_ALLOC_GA;
 
-            scope_updated = true;
-
             // scopes (compacted bits)
             tmp.scope = acl_scopes;
             at_properties_seen |= AT_PROP_SCOPE;
@@ -1028,9 +1025,6 @@ static void oc_core_auth_at_post_handler(oc_request_t* request, oc_interface_mas
             */
             tmp.scope = OC_ACL_GA;
             at_properties_seen |= AT_PROP_SCOPE;
-
-            // as in the string scope branch: a GA-only update needs no re-initialization of the OSCORE contexts (see below)
-            scope_updated = true;
           }
         }
         else if (object->type == OC_REP_STRING)
@@ -1056,7 +1050,7 @@ static void oc_core_auth_at_post_handler(oc_request_t* request, oc_interface_mas
             at_properties_seen |= AT_PROP_PROFILE;
 
             // the profile decides whether an OSCORE context exists at all -> the contexts must be re-initialized
-            other_updated = true;
+            key_material_updated = true;
           }
         }
         else if (object->type == OC_REP_OBJECT)
@@ -1098,7 +1092,7 @@ static void oc_core_auth_at_post_handler(oc_request_t* request, oc_interface_mas
                       return;
                     }
 
-                    other_updated = true;
+                    key_material_updated = true;
                   }
                 }
                 else if (oscore_object->type == OC_REP_BYTE_STRING)
@@ -1135,7 +1129,7 @@ static void oc_core_auth_at_post_handler(oc_request_t* request, oc_interface_mas
                     oc_new_byte_string(&tmp.osc_ms, mastersecret_ptr, mastersecret_size);
                     allocator |= AT_ALLOC_OSC_MS;
 
-                    other_updated = true;
+                    key_material_updated = true;
                     at_properties_seen |= AT_PROP_OSC_MS;
                   }
                   else if (cnf_object_nr == 8 && oscore_object_nr == 4 && oscore_object->iname == 6)
@@ -1158,7 +1152,7 @@ static void oc_core_auth_at_post_handler(oc_request_t* request, oc_interface_mas
                     }
                     oc_new_byte_string(&tmp.osc_contextid, oc_string(oscore_object->value.string), id_context_size);
                     allocator |= AT_ALLOC_OSC_CONTEXTID;
-                    other_updated = true;
+                    key_material_updated = true;
                   }
                   else if (cnf_object_nr == 8 && oscore_object_nr == 4 && oscore_object->iname == 0)
                   {
@@ -1180,7 +1174,7 @@ static void oc_core_auth_at_post_handler(oc_request_t* request, oc_interface_mas
                     }
                     oc_new_byte_string(&tmp.osc_id, oc_string(oscore_object->value.string), sender_id_size);
                     allocator |= AT_ALLOC_OSC_ID;
-                    other_updated = true;
+                    key_material_updated = true;
                     at_properties_seen |= AT_PROP_OSC_ID;
                   }
                   else if (cnf_object_nr == 8 && oscore_object_nr == 4 && oscore_object->iname == 5)
@@ -1193,7 +1187,7 @@ static void oc_core_auth_at_post_handler(oc_request_t* request, oc_interface_mas
                     }
                     oc_new_byte_string(&tmp.osc_salt, oc_string(oscore_object->value.string), oc_string_len(oscore_object->value.string));
                     allocator |= AT_ALLOC_OSC_SALT;
-                    other_updated = true;
+                    key_material_updated = true;
                   }
                 }
 
@@ -1336,14 +1330,18 @@ static void oc_core_auth_at_post_handler(oc_request_t* request, oc_interface_mas
     Use Case
     - update ONE or MANY access token in place (as part of one request), such as to extend the 'exp' time of an access token without rewriting the key
       (such as a token for a diagnostic function that publishes a live value to a visualization)
-    -> a scope-only update needs no re-initialization, all other cases add the oscore contexts by reinitializing all used oscore keys
+    -> a request without a key change (no cnf, no profile) needs no re-initialization, all other cases add the oscore contexts
+       by reinitializing all used oscore keys
+       - scope update   -> the contexts stay valid
+       - id-only delete -> oc_delete_at_table_entry() already freed the contexts of the deleted token
+       - no-op update   -> nothing changed
+       - a created token always carries cnf (mandatory) -> key_material_updated is set, no extra check of 'created' needed
   */
-  const bool scope_only = return_status == OC_STATUS_CHANGED && !other_updated && scope_updated;
-  if (!scope_only)
+  if (key_material_updated)
   {
     oc_init_oscore_from_storage(false);
   }
-  OC_DBG("oscore contexts %s", scope_only ? "kept (scope-only update)" : "reinitialized");
+  OC_DBG("oscore contexts %s", key_material_updated ? "reinitialized" : "kept (no key changed)");
 
   // the last return status from a collection with 'n' POST elements is responded (CREATED/CHANGED)
   oc_prepare_no_format_response_no_payload(request, return_status);
