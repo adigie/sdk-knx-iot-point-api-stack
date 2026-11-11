@@ -905,6 +905,7 @@ protected:
     group_address_ = 0x1234;
     at_.ga = &group_address_;
     at_.ga_len = 1;
+    at_.scope = OC_ACL_GA; // as POST /auth/at sets it for a group address scope
 
     const uint8_t recipient_id[] = { 0xBB };
     oc_oscore_context_params_t params = {};
@@ -1197,6 +1198,7 @@ static int count_contexts(const oc_oscore_context_t* first)
 TEST_F(OscoreEngine, MulticastRequestWithTokenWithoutGroupAddressIsSilentlyDropped)
 {
   at_.ga_len = 0;
+  at_.scope = OC_ACL_P;
 
   const uint8_t plaintext[] = { COAP_POST };
   oc_message_t* message = make_encrypted_request(plaintext, sizeof(plaintext));
@@ -1211,6 +1213,32 @@ TEST_F(OscoreEngine, MulticastRequestWithTokenWithoutGroupAddressIsSilentlyDropp
   EXPECT_EQ(oc_process_nevents(), 0);
   EXPECT_EQ(g_oscore_send_calls, 0);
   EXPECT_EQ(message->ref_count, 1U);
+  oc_message_unref(message);
+}
+
+/*
+  an 'if.g.s' token has no group address list but covers ALL group addresses (spec 3.5.3, 2.5.9.6)
+  -> a multicast request with it is decrypted and queued, the ACL of /k decides as on unicast
+*/
+TEST_F(OscoreEngine, MulticastRequestWithIfGsTokenIsDecrypted)
+{
+  at_.ga_len = 0;
+  at_.scope = OC_ACL_G;
+
+  const uint8_t plaintext[] = { COAP_POST };
+  oc_message_t* message = make_encrypted_request(plaintext, sizeof(plaintext));
+  ASSERT_NE(message, nullptr);
+  message->data[0] = 0x50; /* NON, as a multicast request */
+  message->endpoint.flags = MULTICAST;
+
+  ASSERT_EQ(oc_process_post(&oc_oscore_handler, oc_events[INBOUND_OSCORE_EVENT], message), OC_PROCESS_ERR_OK);
+  oc_process_run();
+
+  EXPECT_NE(message->endpoint.flags & OSCORE_DECRYPTED, 0);
+  EXPECT_EQ(oc_process_nevents(), 1);
+  EXPECT_EQ(g_oscore_send_calls, 0);
+
+  oc_message_unref(message);
   oc_message_unref(message);
 }
 

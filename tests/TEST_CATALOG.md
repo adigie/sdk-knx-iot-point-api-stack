@@ -1,7 +1,7 @@
 # KNX IoT Point API Stack - Test Catalog
 
 > **1913 unit tests** on `linux-test-asan` (63 files in `tests/unit/`, counted by CTest on 2026-11-09, including the
-> `test_dns_sd_mdns.cpp` cases registered under `if(UNIX)` only) and **295 runtime tests** (20 files in `tests/runtime/`, collected
+> `test_dns_sd_mdns.cpp` cases registered under `if(UNIX)` only) and **297 runtime tests** (20 files in `tests/runtime/`, collected
 > on 2026-11-11).
 > The conformance tier is not listed here: the test tool
 > (`tests/iot-test-tool/`) generates it from KNX's conformance-test template,
@@ -374,7 +374,7 @@ Replay Protection (14 tests)
 ---
 
 
-OSCORE Engine Security (65 tests)
+OSCORE Engine Security (66 tests)
 
 **Source:** `security/oc_oscore_engine.c` (unified anchor/seen-responder echo ring and inbound OSCORE process path)
 
@@ -438,7 +438,8 @@ OSCORE Engine Security (65 tests)
 | `OutboundResponseNotSharedIsEncryptedInPlace` | Response with `ref_count` 1 is encrypted in place and sent |
 | `OutboundUnicastConRequestSharedIsClonedAndStaysPlaintext` | Shared unicast CON request (`ref_count` 2, the CON transaction) is cloned; the original stays plaintext, only the engine's reference is released |
 | `OutboundMulticastRequestSharedIsClonedAndStaysPlaintext` | Shared multicast request is cloned; the original stays plaintext |
-| `MulticastRequestWithTokenWithoutGroupAddressIsSilentlyDropped` | A multicast OSCORE request whose token has no group addresses is discarded before decryption and context creation, no reply (spec 2.6.9.1 + 2.5.9.6) |
+| `MulticastRequestWithTokenWithoutGroupAddressIsSilentlyDropped` | A multicast OSCORE request whose token has no group rights (an `if.p` token: no group addresses, no `if.g.s`) is discarded before decryption and context creation, no reply (spec 2.6.9.1 + 2.5.9.6) |
+| `MulticastRequestWithIfGsTokenIsDecrypted` | A multicast OSCORE request with an `if.g.s` token (no group address list, but all group addresses, spec 3.5.3) is decrypted and queued for RI, no echo; the `/k` ACL decides |
 | `MulticastEchoResponseEncryptFailureFreesTheTemporaryContext` | An encrypt error frees the temporary 'Response Sender Context' of a multicast caused echo response (`--wrap=oc_oscore_encrypt`) |
 | `InboundRequestWithFullQueueReleasesTheMessage` | decrypted inbound request, the hand-over to the CoAP engine is rejected (queue full): the message is released |
 | `OutboundMulticastWithFullQueueReleasesTheMessage` | outbound multicast (encrypted in place), the hand-over for sending is rejected: handed to `oc_message_post` and released there (`--wrap=oc_message_post`) |
@@ -1636,7 +1637,7 @@ Measured link-format sizes at `KNX_PAYLOAD_SIZE` 768 (512-byte blocks):
 
 ---
 
-### test_group_comm.py — Group Communication (34 tests, 39 collected)
+### test_group_comm.py — Group Communication (36 tests, 41 collected)
 
 | Class | Test | Overlaps | What it checks |
 |-------|------|----------|----------------|
@@ -1658,6 +1659,8 @@ Measured link-format sizes at `KNX_PAYLOAD_SIZE` 768 (512-byte blocks):
 |  | `test_read_on_init_released_after_network_up` |  | Network down from the start, then up after ~600 ms -> read fires. |
 |  | `test_read_on_init_abandoned_after_max_retries` |  | Network never comes up -> read is abandoned after the 20-cycle cap. |
 | **TestMulticastResponseUpdateOnly** | `test_answer_updates_update_only_go` |  | Set /p/1=true via /p, then multicast answer (st="a") false on a u-only GO. |
+| **TestMulticastWriteWithIfGsToken** | `test_multicast_write_with_if_g_s_token_is_applied` |  | Multicast write true to ga 65535 protected with an `if.g.s` token (no ga list, all ga, spec 3.5.3 / 2.5.9.6) -> /p/1 becomes true. |
+| **TestMulticastWriteWithoutGroupRights** | `test_multicast_write_without_group_rights_is_dropped` |  | Control: the same write with an `if.p` only token (no group rights) is discarded, /p/1 stays false. |
 | **TestOwnGroupObjectUpdate** | `test_self_update_on_transmit` | 5.4.1.12 | Trigger sensor → DUT sends multicast write for ga=65535, DUT also updates /p/1 (receiving GO with ga=65535). |
 | **TestLongGASend** | `test_sends_long_ga` | 5.4.1.14 | Trigger sensor → DUT sends multicast with ga=4294967295. |
 | **TestUnicastConfirmable** | `test_unicast_sends_con` | 5.4.1.15 | Trigger sensor → DUT resolves PEER_IA via discovery, then sends CON POST /k (unicast to test host). |

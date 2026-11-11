@@ -5,7 +5,7 @@ Defects in the stack found by its tests that are still open.
 A finding is removed once it is fixed (its test then asserts the corrected
 behaviour) or withdrawn. Numbers are never reused, and tests and comments
 keep citing them: `git log -p -S "F-NNN" -- tests/FINDINGS.md` shows a
-removed entry. The next number is F-072.
+removed entry. The next number is F-073.
 
 ## ~~F-029: `oc_endpoint_print()` frees an uninitialized string for non-IPv6 endpoints~~ - FIXED
 
@@ -537,3 +537,18 @@ removed entry. The next number is F-072.
   | new limit | none | 10 entries -> 4.13 | none |
 
 - **Fix:** option B. `oc_core_auth_at_post_handler()` counts the entries first (more than `AT_POST_MAX_ENTRIES` (10) -> 4.13), then checks each entry into `at_post_entry_t entries[10]` on the stack (shadow copy, allocator bits, delete flag, key-change flag); every error goes through `at_post_reject()` (frees the current and all earlier copies, answers the status) and changes nothing. A duplicate id in the request -> 4.00. Only when all passed, the commit loop deletes / frees the contexts on a key change / replaces the entry / writes the id / stores, then `oc_init_oscore_from_storage()` as before. `find_empty_at_entry(skip)` gives the nth new token of the request the nth free slot (ids are written on commit); the PASE caller passes 0. Tests: `test_oc_knx_sec`, `SecAtPost.CollectionRejectedAtALaterEntryKeepsTheEarlierTokenAndItsContexts` and `CollectionWithMoreThanTenEntriesIsRejectedWith413` (both fail without the fix), `TenNewTokensInOneRequestAreCreatedInTenSlots`, `SameIdTwiceInOneRequestIsRejected`, `DeleteAndRecreateInOneRequestIsRejected`.
+
+## ~~F-072: an inbound multicast request protected with an `if.g.s` token is dropped, although `if.g.s` authorizes all group addresses~~ - FIXED
+
+- **Files:** `security/oc_oscore_engine.c`, `oc_oscore_receive_message()` 8.2 (inbound request with 'kid': the multicast drop `(msg->endpoint.flags & MULTICAST) && at_entry->ga_len == 0` and its comment, case (b)); `api/oc_knx_sec.c`, `oc_knx_sec_check_acl()` (case O1: `if.g.s` -> all group addresses allowed on `/k`).
+- **Severity:** Low - a multicast group message from a sender whose token holds `if.g.s` (no explicit GA list) is never processed; the stack itself never sends multicast with such a token (spec 6.3.2.1 picks a token with the GA in its scope list), so this hits only other senders.
+- **Description:**
+  - the engine discards an inbound multicast request silently when the token of its 'kid' has no group addresses (`ga_len == 0`), before a context is created and before the replay check (no echo)
+  - an `if.g.s` token has a string scope -> `ga_len == 0` -> dropped, like a token with no group rights at all (e.g. only `if.p`)
+  - spec 3.5.3 (Table 47): `if.g.s` = S-Mode group communication (input and output) for ALL group addresses; spec 2.5.9.6: the token used for decryption must contain the group address of the message in its scope -> `if.g.s` covers every group address
+  - the ACL agrees: `oc_knx_sec_check_acl()` lets an `if.g.s` token reach `/k` for any group address (O1), but a multicast request never gets there; a unicast request with the same token is accepted
+  - the engine comment cites 2.5.9.6 as if it required an explicit GA list
+- **Evidence:** code reading.
+- **Expected:** a multicast request is dropped early only when its token has no group rights at all (neither `if.g.s` nor `<ga>`); an `if.g.s` token is accepted and the ACL decides per group address, as on unicast.
+- **Possible fix:** test the scope mask instead of `ga_len`: `(msg->endpoint.flags & MULTICAST) && !(oc_at_get_scope_mask(at_entry) & (OC_ACL_G | OC_ACL_GA))` (`oc_at_get_scope_mask()` is static in `api/oc_knx_sec.c` today -> expose it in `oc_knx_sec.h`); correct the comment of case (b).
+- **Fix:** the engine drops a multicast request only when the token's scope has neither `OC_ACL_G` (`if.g.s`) nor `OC_ACL_GA` (`<ga>`): `msg->endpoint.flags & MULTICAST && !(at_entry->scope & (OC_ACL_G | OC_ACL_GA))`. `ga_len` is no longer needed, because POST /auth/at gives a token a group address list exactly when it sets `OC_ACL_GA`. `scope` is read directly, so `oc_at_get_scope_mask()` stays static. The comments of case (b) and of the multicast echo branch say "group rights" now. `if.g.s` only takes effect at `/k`, the only resource with `OC_ACL_G` (spec 2.5.9.1), and multicast is always s-mode to `/k` (spec 2.6.9.1). Tests: `test_oc_oscore_echo_tx`, `OscoreEngine.MulticastRequestWithIfGsTokenIsDecrypted` (fails without the fix); the fixture token now has `OC_ACL_GA` as POST /auth/at sets it, and the drop test uses an `if.p` token. Runtime: `test_group_comm.py`, `TestMulticastWriteWithIfGsToken` (fails without the fix: /p/1 stays false) and the control `TestMulticastWriteWithoutGroupRights`.
