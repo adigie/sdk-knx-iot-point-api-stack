@@ -524,7 +524,7 @@ OSCORE Engine Security (67 tests)
 
 ---
 
-### test_oc_knx_fp.cpp — Group Object & FP Tables (89 tests)
+### test_oc_knx_fp.cpp — Group Object & FP Tables (92 tests)
 
 **Source:** `api/oc_knx_fp.c`
 
@@ -539,7 +539,7 @@ OSCORE Engine Security (67 tests)
 | `GoTableHref` | 7 | href getter + find-first/next by href, sending-GA lookup |
 | `RecipientTable` | 1 | Recipient index-from-id match/miss |
 | `BelongsHref` | 3 | href ownership check, non-discoverable skipped |
-| `FpHandlers` | 30 | CoAP handlers of `/fp/g`, `/fp/p`, `/fp/r` and their `/*` entry resources: wrong-Accept rejection, empty table → 2.05, invalid paging (`ps`/`pn`) → 4.00, populated link-format listing incl. comma separator and next-page indicator, entry GET (unknown id → 4.04, known id → 2.05 CBOR), entry DELETE outside loading state → 4.00; POST (loading state) with a repeated ga key keeps the last one: `/fp/p` and `/fp/r` `[1]` then `[]` → empty ga, `/fp/g` `[1]` then `[2]` → `[2]` |
+| `FpHandlers` | 33 | CoAP handlers of `/fp/g`, `/fp/p`, `/fp/r` and their `/*` entry resources: wrong-Accept rejection, empty table → 2.05, invalid paging (`ps`/`pn`) → 4.00, populated link-format listing incl. comma separator and next-page indicator, entry GET (unknown id → 4.04, known id → 2.05 CBOR), entry DELETE outside loading state → 4.00; POST (loading state) with a repeated ga key keeps the last one: `/fp/p` and `/fp/r` `[1]` then `[]` → empty ga, `/fp/g` `[1]` then `[2]` → `[2]`; an empty array on a key other than ga (`{0: 1, 11: []}`) on an existing entry → 4.00, the entry unchanged, in all three tables (only the id alone deletes, spec 2.5.7.4.1) |
 | `GroupTableStorage` | 7 | Recipient/publisher entry encode-decode round-trip (NON flag as boolean, empty/multiple GA arrays, absent-NON default) |
 | `RecipientAccessToken` | 5 | `oc_is_unicast_recipient_access_token`: unicast entry naming the token -> true; multicast entry with `at`, unused slot, other/prefix/longer id, empty or NULL id -> false |
 

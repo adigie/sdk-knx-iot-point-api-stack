@@ -668,7 +668,7 @@ static void oc_core_auth_at_get_handler(oc_request_t* request, oc_interface_mask
   - low byte  AT_SEEN_*  -> the member is in the request (mandatory check, cnf present, salt/contextId carried)
                             a bitmask, not a counter: a repeated CBOR key survives oc_parse_rep() as a separate rep,
                             so counting occurrences would let one member repeated five times stand in for all five mandatory ones
-  - high byte AT_ALLOC_* -> the value was allocated in the shadow copy (as TABLE_AT_REF/TABLE_GAS on fp/r)
+  - high byte AT_ALLOC_* -> the value was allocated in the shadow copy (as TBL_ALLOC_AT/TBL_ALLOC_GA on fp/r)
                             freed from the copy on a reject, released from the live entry on commit
 */
 #define AT_SEEN_ID             (1u << 0)

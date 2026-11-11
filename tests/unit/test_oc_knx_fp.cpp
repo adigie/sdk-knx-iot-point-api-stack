@@ -1345,7 +1345,7 @@ TEST_F(FpHandlers, RcpEntryDeleteOutsideLoadingStateBadRequest)
 /* ───────── POST handlers: repeated ga key in one entry (shadow copy) ───────
 
    A repeated key is accepted, the last one wins. The ga array of the earlier
-   key exists only in the shadow copy and is freed there (allocator bit set);
+   key exists only in the shadow copy and is freed there (TBL_ALLOC_GA bit set);
    the live array of the entry is freed once on commit. A leak or a double free
    shows up under the ASan preset, the asserts check the last value won. */
 
