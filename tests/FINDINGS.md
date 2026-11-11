@@ -5,7 +5,7 @@ Defects in the stack found by its tests that are still open.
 A finding is removed once it is fixed (its test then asserts the corrected
 behaviour) or withdrawn. Numbers are never reused, and tests and comments
 keep citing them: `git log -p -S "F-NNN" -- tests/FINDINGS.md` shows a
-removed entry. The next number is F-074.
+removed entry. The next number is F-076.
 
 ## ~~F-029: `oc_endpoint_print()` frees an uninitialized string for non-IPv6 endpoints~~ - FIXED
 
@@ -566,3 +566,33 @@ removed entry. The next number is F-074.
 - **Expected:** a full token carrying `cnf` replaces all `osc` members; an optional member it does not carry (salt, contextId) is empty afterwards.
 - **Possible fix:** after the parse loop, if the request carried `cnf` (`AT_PROP_CNF`): set `tmp.osc_salt` / `tmp.osc_contextid` to an empty byte string when the request did not carry them (`AT_ALLOC_OSC_SALT` / `AT_ALLOC_OSC_CONTEXTID` not set) and set the allocator bit, so the commit frees the old values and a reject frees the empty copies; `key_changed` then sees the change. Test: POST a token with salt and contextId, re-POST it as a full token without them -> both empty (fails today).
 - **Fix:** in the b + d branch of `oc_core_auth_at_post_handler()`, before `key_changed`: if the request carried `cnf` (`AT_PROP_CNF`), `tmp.osc_salt` / `tmp.osc_contextid` are set to an empty byte string when the request did not carry them, with their allocator bit (`AT_ALLOC_OSC_SALT` / `AT_ALLOC_OSC_CONTEXTID`): the commit frees the old values, a reject frees the empty copies, `key_changed` sees the change and frees the contexts. Tests: `test_oc_knx_sec`, `SecAtPost.FullTokenWithoutSaltAndContextIdClearsTheOldOnes` (token with salt and contextId, full re-POST without them -> 2.04, both empty; fails without the fix).
+
+## ~~F-074: POST /auth/at with a CBOR null member deletes the existing token~~ - FIXED
+
+- **Files:** `api/oc_knx_sec.c`, `oc_core_auth_at_post_handler()` (member loop: no branch for `OC_REP_NULL`, `id_only` stays true -> case c); `api/oc_rep.c` (CBOR null / undefined parsed as `OC_REP_NULL`, before as `OC_REP_NIL`).
+- **Severity:** Medium - a malformed or tool-generated update such as `{0: "tok", 9: null}` silently deletes an existing access token (its contexts, observers and SSN record) instead of being rejected or ignored; the client gets 2.04.
+- **Description:**
+  - the parser now maps CBOR null / undefined to its own type `OC_REP_NULL` (an empty array stays `OC_REP_NIL`)
+  - the member loop of the handler has branches for string array, int array, string, int, object and `OC_REP_NIL`; the NIL branch sets `id_only = false` ("an empty element ... causes a not an id only")
+  - a member with `OC_REP_NULL` (or `OC_REP_UNSUPPORTED`) matches no branch -> `id_only` stays true -> an existing token is deleted on commit (case c)
+  - before the parser change, null was `OC_REP_NIL` -> not id only -> a no-op update (2.04), the token stayed
+  - spec 2.6.7.2 / 3.5.4.2: only a payload with the id alone deletes a token
+  - the fp tables are not affected: their `switch` sends an unknown type to `default` -> 4.00
+- **Evidence:** code reading.
+- **Expected:** a member with an unexpected type (null, undefined, unsupported) is not "id only"; the request is rejected with 4.00 (as on fp/g, fp/p, fp/r) and the token stays.
+- **Possible fix:** in the member loop, a final `else` for any other type: `id_only = false` and reject with 4.00 via `at_post_reject()`, or at least `id_only = false` for `OC_REP_NULL` / `OC_REP_UNSUPPORTED`. Test: create "tok", POST `{0: "tok", 9: null}` -> not deleted (fails today: deleted).
+- **Fix:** the member loop of `oc_core_auth_at_post_handler()` ends with an `else` for every type it does not handle: 4.00 via `at_post_reject()`, nothing changed. The former `OC_REP_NIL` branch (empty array -> not "id only", 2.04 without a change) is folded into it: an empty array is no valid scope (spec 3.5.4.2) and is rejected the same way (create was already 4.00). Tests: `test_oc_knx_sec`, `SecAtPost.NullMemberIsRejectedAndDoesNotDeleteTheToken` (`{0: "tok", 9: null}` -> 4.00, token kept; fails without the fix: deleted) and `SecAtPost.EmptyScopeArrayUpdateIsRejectedAndKeepsTheToken` (`{0: "tok", 9: []}` -> 4.00, scope kept; fails with the old NIL branch: 2.04).
+
+## F-075: an empty array on a non-ga key of POST /fp/g deletes the group object entry
+
+- **Files:** `api/oc_knx_fp.c`, POST handlers of `/fp/g` (`case OC_REP_NIL`: `if (object->iname != 7) break;` without `id_only = false`), `/fp/p` and `/fp/r` (`case OC_REP_NIL`: other keys ignored).
+- **Severity:** Medium - `{0: 1, 11: []}` on an existing group object entry silently deletes it (2.04); on `/fp/p` and `/fp/r` the same request is answered 2.04 although nothing changed.
+- **Description:**
+  - an empty CBOR array is parsed as `OC_REP_NIL` (null / undefined are `OC_REP_NULL` and get 4.00 in all three tables through `default`)
+  - `/fp/g`: `OC_REP_NIL` on a key other than ga (7) breaks out of the switch without `id_only = false` -> the request counts as "id only" -> the existing entry is deleted (case c); on `main` `{0: 1, 11: null}` did the same, the parser change fixed only the null half
+  - `/fp/p`, `/fp/r`: `OC_REP_NIL` sets `id_only = false` first -> no delete, but a key other than ga is ignored -> 2.04 without a change
+  - spec 2.5.7.4.1 Table 20: only an empty element (only "id") deletes an entry; an empty array is no valid value for any member but the ga of PUB / RCP (multicast)
+  - `/auth/at` (F-074) answers any empty array with 4.00 now
+- **Evidence:** code reading.
+- **Expected:** `OC_REP_NIL` on a key other than ga (7) -> 4.00, the entry unchanged, in all three tables; the empty ga stays as it is (GO 4.00, PUB / RCP accepted for multicast).
+- **Possible fix:** in the three `case OC_REP_NIL`: a key other than 7 -> free the tmp entry and answer 4.00 (as in `default`). Tests: one per table, `{0: <id>, 11: []}` on an existing entry -> 4.00 and the entry unchanged (GO fails today: deleted; PUB / RCP fail today: 2.04).

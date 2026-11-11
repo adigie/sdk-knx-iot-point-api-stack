@@ -989,6 +989,72 @@ TEST_F(SecAtPost, FullTokenWithoutSaltAndContextIdClearsTheOldOnes)
 }
 
 /*
+  a member of an unexpected type is rejected, it is not an id-only delete
+  - token "tok" created
+  - POST { 0: { 0: "tok", 9: null } } -> 4.00 (CBOR null is OC_REP_NULL, not an empty array)
+  - the token still exists with its key (spec 2.6.7.2: only the id alone deletes a token)
+*/
+TEST_F(SecAtPost, NullMemberIsRejectedAndDoesNotDeleteTheToken)
+{
+  const std::vector<uint8_t> create = make_complete_at_payload(16, false, 1, 10);
+  ASSERT_EQ(post_at(create.data(), create.size()), oc_status_code(OC_STATUS_CREATED));
+  oc_free_rep(payload);
+  payload = nullptr;
+
+  oc_auth_at_t* e = oc_core_find_at_entry_by_access_token("tok", 3);
+  ASSERT_NE(e, nullptr);
+
+  /* { 0: { 0: "tok", 9: null } } */
+  const uint8_t cbor[] = {
+    0xa1, 0x00,
+    0xa2,
+    0x00, 0x63, 't', 'o', 'k',
+    0x09, 0xf6
+  };
+  EXPECT_EQ(post_at(cbor, sizeof(cbor)), oc_status_code(OC_STATUS_BAD_REQUEST));
+
+  EXPECT_EQ(oc_core_find_at_entry_by_access_token("tok", 3), e);
+  EXPECT_EQ(oc_byte_string_len(e->osc_ms), 16u);
+
+  /* the entry was also stored, keep storage clean for the following tests */
+  oc_delete_at_table();
+}
+
+/*
+  an empty scope array on an existing token is rejected, not answered 2.04 without a change
+  - token "tok" created with scope ["if.sec"]
+  - POST { 0: { 0: "tok", 9: [] } } -> 4.00 (an empty array is no valid scope, spec 3.5.4.2)
+  - the token still exists with its scope
+*/
+TEST_F(SecAtPost, EmptyScopeArrayUpdateIsRejectedAndKeepsTheToken)
+{
+  const std::vector<uint8_t> create = make_complete_at_payload(16, false, 1, 10);
+  ASSERT_EQ(post_at(create.data(), create.size()), oc_status_code(OC_STATUS_CREATED));
+  oc_free_rep(payload);
+  payload = nullptr;
+
+  oc_auth_at_t* e = oc_core_find_at_entry_by_access_token("tok", 3);
+  ASSERT_NE(e, nullptr);
+  const oc_acl_mask_t scope = e->scope;
+  ASSERT_NE(scope, OC_ACL_NONE);
+
+  /* { 0: { 0: "tok", 9: [] } } */
+  const uint8_t cbor[] = {
+    0xa1, 0x00,
+    0xa2,
+    0x00, 0x63, 't', 'o', 'k',
+    0x09, 0x80
+  };
+  EXPECT_EQ(post_at(cbor, sizeof(cbor)), oc_status_code(OC_STATUS_BAD_REQUEST));
+
+  EXPECT_EQ(oc_core_find_at_entry_by_access_token("tok", 3), e);
+  EXPECT_EQ(e->scope, scope);
+
+  /* the entry was also stored, keep storage clean for the following tests */
+  oc_delete_at_table();
+}
+
+/*
   an update of the <ga> scope only keeps the OSCORE contexts as they are
   - token "tok" created (OSCORE profile) -> its sender context exists; its SSN is moved on to 1234 (as after traffic)
   - POST the same id with <ga> [2] only -> 2.04

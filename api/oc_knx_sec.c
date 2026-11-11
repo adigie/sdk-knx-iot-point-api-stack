@@ -1192,10 +1192,17 @@ static void oc_core_auth_at_post_handler(oc_request_t* request, oc_interface_mas
             cnf_object = cnf_object->next;
           }
         } 
-        else if (object->type == OC_REP_NIL)
+        else
         {
-          // an empty (array) element such as [{0: '12', 9: []}]  - as a kind of MaC mistake ar attack - causes a "not an id only"
-          id_only = false;
+          /*
+            any other member type is not valid in an access token -> 4.00, nothing changed (as on fp/g, fp/p, fp/r)
+            - an empty array (OC_REP_NIL) such as {0: "tok", 9: []}: no valid scope (spec 3.5.4.2), never "id only"
+            - null / undefined (OC_REP_NULL), a type the parser does not map (OC_REP_UNSUPPORTED), bool, float, byte string, ...
+            - without this, such a member left 'id_only' true -> {0: "tok", 9: null} deleted the existing token (case c)
+          */
+          OC_ERR("invalid member type %d (key %d)", (int)object->type, (int)object->iname);
+          at_post_reject(request, entries, entry_count, &tmp, member_flags, OC_STATUS_BAD_REQUEST);
+          return;
         }
 
         object = object->next;
