@@ -1366,6 +1366,36 @@ TEST_F(OscoreEngine, OutboundResponseIsEncryptedAndSent)
 }
 
 /*
+  a POST /auth/at that changes the key of the token protecting the request itself is applied, but gets no 2.04
+  - the commit frees ALL contexts of the token (key changed), the re-initialization rebuilds only its sender context
+  - the response must be protected with the request's context (RFC 8613 8.3): looked up as recipient context by the token's
+    osc id -> gone, the response is dropped (the client sees a timeout)
+  - intended: key rotation per spec 3.5.4.1 uses a NEW token, switches to it and deletes the old one later
+  - the handler side (commit frees the recipient context) is SecAtPost.FullOverwriteWithNewKeyFreesTheCachedRecipientContext
+*/
+TEST_F(OscoreEngine, ResponseToARequestThatReKeyedItsOwnTokenIsDropped)
+{
+  oc_message_t* message = make_outbound_response();
+  ASSERT_NE(message, nullptr);
+
+  // commit (key changed) + re-initialization
+  oc_oscore_free_contexts_at_id(&at_);
+  const uint8_t sender_id[] = { 0xCC };
+  oc_oscore_context_params_t params = {};
+  params.sender_id = sender_id;
+  params.sender_id_size = sizeof(sender_id);
+  params.auth_at = &at_;
+  params.read_ssn_from_storage = false;
+  ASSERT_NE(oc_oscore_add_context(&params), nullptr);
+
+  ASSERT_EQ(oc_process_post(&oc_oscore_handler, oc_events[OUTBOUND_UC_OSCORE_EVENT], message), OC_PROCESS_ERR_OK);
+  oc_process_run();
+  oc_process_run();
+
+  EXPECT_EQ(g_network_send_calls, 0);
+}
+
+/*
   Clone only for a shared plaintext
   - ref_count 1 (no other holder: multicast, unicast NON, responses) -> encrypted in place, the handed message is sent
   - ref_count > 1 (CON transaction keeps it for retransmits / echo re-request) -> a clone is encrypted and sent,

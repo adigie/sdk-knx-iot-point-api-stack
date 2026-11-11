@@ -374,7 +374,7 @@ Replay Protection (14 tests)
 ---
 
 
-OSCORE Engine Security (66 tests)
+OSCORE Engine Security (67 tests)
 
 **Source:** `security/oc_oscore_engine.c` (unified anchor/seen-responder echo ring and inbound OSCORE process path)
 
@@ -425,6 +425,7 @@ OSCORE Engine Security (66 tests)
 | `OutboundUnicastRequestIsEncryptedAndSent` | Sender context encrypts a unicast request, advances SSN and dispatches the OSCORE frame |
 | `OutboundMulticastRequestIsEncryptedAndSent` | Sender context encrypts a multicast NON request, advances SSN and dispatches the OSCORE frame |
 | `OutboundResponseIsEncryptedAndSent` | Recipient context encrypts a normal response without consuming a sender SSN |
+| `ResponseToARequestThatReKeyedItsOwnTokenIsDropped` | A POST /auth/at that changes the key of the token protecting it is applied but gets no 2.04: its contexts freed, only the sender context rebuilt, no recipient context for the response (RFC 8613 8.3); key rotation per spec 3.5.4.1 uses a new token |
 | `EmptyDecryptedPayloadReceivesBadRequest` | Authenticated request with an empty inner plaintext receives 4.00 |
 | `OutboundAckRequestIsDropped` | ACK carrying a request code is dropped on the outbound path |
 | `OutboundMulticastWithoutSModeFlagIsDropped` | Multicast message without the S-mode flag is dropped |
