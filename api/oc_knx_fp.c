@@ -596,26 +596,15 @@ static void oc_core_fp_g_post_handler(oc_request_t* request, oc_interface_mask_t
             }
 
             break;
-          case OC_REP_NIL:
-
-            if (object->iname != 7)
-            {
-              break;
-            }
-
-            // specification request, not allowed empty ga array (7) for mc, coded in current CBOR with "OC_REP_NIL"
-
-            /*
-             - GOT1, see above: release a beforehand assigned ga array (2 x in the request would be wrong)
-             - DON'T release HERE a present assigned ga array from the org. ptr (will NOT happen on error)
-             - free ignores NULL ptr
-            */
-
-            // fall through ...
           default:
 
-            // any other invalid type returns a 4.00
-            OC_ERR("invalid object type detected");
+            /*
+              any other type returns a 4.00, nothing changed
+              - an empty array (OC_REP_NIL) on ANY key: a GO needs at least one ga (7), no other member is an array;
+                it is never "id only" (it used to leave 'id_only' true on a key other than 7 -> {0: 1, 11: []} deleted the entry)
+              - null / undefined (OC_REP_NULL), a type the parser does not map (OC_REP_UNSUPPORTED), bool, ...
+            */
+            OC_ERR("invalid object type %d (key %d) detected", (int)object->type, (int)object->iname);
 
             // on error: free GO tmp entry (all heap allocations)
             oc_free_allocated_group_object_table_elements(&tmp_go_entry, allocator);
@@ -1256,30 +1245,36 @@ static void oc_core_fp_p_post_handler(oc_request_t* request, oc_interface_mask_t
           break;
         case OC_REP_NIL:
 
-          // any extra element - even if not valid - causes a "not an id only"
+          // an empty array is only valid as the empty ga array (7) for mc (specification request), any other key -> 4.00, nothing changed
+          if (object->iname != 7)
+          {
+            OC_ERR("empty array for key %d detected", (int)object->iname);
+            oc_free_allocated_group_table_elements(&tmp_gpt_entry, allocator);
+            oc_prepare_no_format_response_no_payload(request, OC_STATUS_BAD_REQUEST);
+            return;
+          }
+
+          // any extra element causes a "not an id only"
           id_only = false;
 
-          // specification request, allowed empty ga array (7) for mc, coded in current CBOR with "OC_REP_NIL"
-          if (object->iname == 7)
+          // empty ga array (7) for mc, coded in current CBOR with "OC_REP_NIL"
+          gpt_properties_seen |= TBL_PROP_GA;
+
+          /*
+           - GPT1, see above: release a beforehand assigned ga array (2 x in the request would be wrong)
+           - DON'T release HERE a present assigned ga array from the org. ptr (will happen later on no error)
+           - free ignores NULL ptr
+          */
+          if (allocator & TABLE_GAS)
           {
-            gpt_properties_seen |= TBL_PROP_GA;
-
-            /*
-             - GPT1, see above: release a beforehand assigned ga array (2 x in the request would be wrong)
-             - DON'T release HERE a present assigned ga array from the org. ptr (will happen later on no error)
-             - free ignores NULL ptr
-            */
-            if (allocator & TABLE_GAS)
-            {
-              free(tmp_gpt_entry.ga);
-            } 
-
-            tmp_gpt_entry.ga_len = 0;
-            tmp_gpt_entry.ga = NULL;
-
-            // also on empty ga array satisfies the items number
-            allocator |= TABLE_GAS;
+            free(tmp_gpt_entry.ga);
           }
+
+          tmp_gpt_entry.ga_len = 0;
+          tmp_gpt_entry.ga = NULL;
+
+          // also on empty ga array satisfies the items number
+          allocator |= TABLE_GAS;
 
           break;
         default:
@@ -1859,30 +1854,36 @@ static void oc_core_fp_r_post_handler(oc_request_t* request, oc_interface_mask_t
           break;
         case OC_REP_NIL:
 
-          // any extra element - even if not valid - causes a "not an id only"
+          // an empty array is only valid as the empty ga array (7) for mc (specification request), any other key -> 4.00, nothing changed
+          if (object->iname != 7)
+          {
+            OC_ERR("empty array for key %d detected", (int)object->iname);
+            oc_free_allocated_group_table_elements(&tmp_grt_entry, allocator);
+            oc_prepare_no_format_response_no_payload(request, OC_STATUS_BAD_REQUEST);
+            return;
+          }
+
+          // any extra element causes a "not an id only"
           id_only = false;
 
-          // specification request, allowed empty ga array (7) for mc, coded in current CBOR with "OC_REP_NIL"
-          if (object->iname == 7)
+          // empty ga array (7) for mc, coded in current CBOR with "OC_REP_NIL"
+          grt_properties_seen |= TBL_PROP_GA;
+
+          /*
+           - GPR1, see above: release a beforehand assigned ga array (2 x in the request would be wrong)
+           - DON'T release HERE a present assigned ga array from the org. ptr (will happen later on no error)
+           - free ignores NULL ptr
+          */
+          if (allocator & TABLE_GAS)
           {
-            grt_properties_seen |= TBL_PROP_GA;
-
-            /*
-             - GPR1, see above: release a beforehand assigned ga array (2 x in the request would be wrong)
-             - DON'T release HERE a present assigned ga array from the org. ptr (will happen later on no error)
-             - free ignores NULL ptr
-            */
-            if (allocator & TABLE_GAS)
-            {
-              free(tmp_grt_entry.ga);
-            }
-
-            tmp_grt_entry.ga_len = 0;
-            tmp_grt_entry.ga = NULL;
-
-            // also an empty ga array satisfies the items number
-            allocator |= TABLE_GAS;
+            free(tmp_grt_entry.ga);
           }
+
+          tmp_grt_entry.ga_len = 0;
+          tmp_grt_entry.ga = NULL;
+
+          // also an empty ga array satisfies the items number
+          allocator |= TABLE_GAS;
 
           break;
         case OC_REP_BOOL:

@@ -1441,3 +1441,86 @@ TEST_F(FpHandlers, GoPostRepeatedGaKeepsTheLastGa)
   oc_free_string(&r->uri);
   oc_ri_delete_resource(r);
 }
+
+/* ───────── POST handlers: empty array on a key other than ga ───────────────
+
+   An empty array (OC_REP_NIL) is only valid as the empty ga (7) of a PUB / RCP
+   entry (multicast). On any other key it is rejected with 4.00, the entry stays
+   as it is; it is never "id only" (only the id alone deletes, spec 2.5.7.4.1). */
+
+/* { 0: { 0: 1, 11: [] } } */
+static const uint8_t kTableEmptyArrayOnKey11[] = {
+  0xa1, 0x00, 0xa2, 0x00, 0x01, 0x0b, 0x80
+};
+
+/* the GO entry used to be deleted (the empty array left 'id_only' true) */
+TEST_F(FpHandlers, GoPostEmptyArrayOnOtherKeyIsRejectedAndKeepsTheEntry)
+{
+  /* the href must name a discoverable resource of the device */
+  oc_resource_t *r = oc_ri_alloc_resource();
+  ASSERT_NE(r, nullptr);
+  r->get_handler.cb = fp_dummy_handler;
+  r->properties = OC_DISCOVERABLE;
+  oc_new_string(&r->uri, "/p/x", 4);
+  ASSERT_TRUE(oc_ri_add_resource(r));
+
+  /* { 0: { 0: 1, 11: "/p/x", 8: w, 7: [9] } } */
+  const uint8_t create[] = {
+    0xa1, 0x00, 0xa4, 0x00, 0x01, 0x0b, 0x64, '/', 'p', '/', 'x', 0x08, 0x10, 0x07, 0x81, 0x09
+  };
+  ASSERT_EQ(invoke_post(core_resource_knx_fp_g, create, sizeof(create)), oc_status_code(OC_STATUS_CREATED));
+
+  EXPECT_EQ(invoke_post(core_resource_knx_fp_g, kTableEmptyArrayOnKey11, sizeof(kTableEmptyArrayOnKey11)),
+            oc_status_code(OC_STATUS_BAD_REQUEST));
+
+  const int index = oc_core_find_index_in_group_object_table_from_id(1);
+  ASSERT_NE(index, -1);
+  oc_group_object_table_t *e = oc_core_get_group_object_table_entry(index);
+  ASSERT_EQ(e->ga_len, 1);
+  EXPECT_EQ(e->ga[0], 9u);
+
+  /* the fixture's clear_tables() drops the ga pointer without freeing it, the delete frees it */
+  EXPECT_EQ(invoke_post(core_resource_knx_fp_g, kTableDeleteId1, sizeof(kTableDeleteId1)),
+            oc_status_code(OC_STATUS_CHANGED));
+
+  oc_free_string(&r->uri);
+  oc_ri_delete_resource(r);
+}
+
+/* the PUB entry was kept, but the request was answered 2.04 without a change */
+TEST_F(FpHandlers, PubPostEmptyArrayOnOtherKeyIsRejectedAndKeepsTheEntry)
+{
+  ASSERT_EQ(invoke_post(core_resource_knx_fp_p, kGroupTableCreate, sizeof(kGroupTableCreate)),
+            oc_status_code(OC_STATUS_CREATED));
+
+  EXPECT_EQ(invoke_post(core_resource_knx_fp_p, kTableEmptyArrayOnKey11, sizeof(kTableEmptyArrayOnKey11)),
+            oc_status_code(OC_STATUS_BAD_REQUEST));
+
+  const int index = oc_core_find_index_in_publisher_table_from_id(1);
+  ASSERT_NE(index, -1);
+  oc_group_table_t *e = oc_core_get_publisher_table_entry(index);
+  ASSERT_EQ(e->ga_len, 1);
+  EXPECT_EQ(e->ga[0], 9u);
+
+  EXPECT_EQ(invoke_post(core_resource_knx_fp_p, kTableDeleteId1, sizeof(kTableDeleteId1)),
+            oc_status_code(OC_STATUS_CHANGED));
+}
+
+/* the RCP entry was kept, but the request was answered 2.04 without a change */
+TEST_F(FpHandlers, RcpPostEmptyArrayOnOtherKeyIsRejectedAndKeepsTheEntry)
+{
+  ASSERT_EQ(invoke_post(core_resource_knx_fp_r, kGroupTableCreate, sizeof(kGroupTableCreate)),
+            oc_status_code(OC_STATUS_CREATED));
+
+  EXPECT_EQ(invoke_post(core_resource_knx_fp_r, kTableEmptyArrayOnKey11, sizeof(kTableEmptyArrayOnKey11)),
+            oc_status_code(OC_STATUS_BAD_REQUEST));
+
+  const int index = oc_core_find_index_in_recipient_table_from_id(1);
+  ASSERT_NE(index, -1);
+  oc_group_table_t *e = oc_core_get_recipient_table_entry(index);
+  ASSERT_EQ(e->ga_len, 1);
+  EXPECT_EQ(e->ga[0], 9u);
+
+  EXPECT_EQ(invoke_post(core_resource_knx_fp_r, kTableDeleteId1, sizeof(kTableDeleteId1)),
+            oc_status_code(OC_STATUS_CHANGED));
+}
