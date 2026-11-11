@@ -1584,6 +1584,111 @@ TEST_F(FpHandlers, PubPostIaOnAMulticastEntrySwitchesToUnicast)
             oc_status_code(OC_STATUS_CHANGED));
 }
 
+/* ───────── POST handlers: a collection is atomic (check all, then commit) ────
+
+   A collection rejected at a later entry stores nothing; more than 5 entries
+   -> 4.13; the same id twice -> 4.00; new entries get one slot each. */
+
+/* { 0: { 0: 1, 13: 1, 7: [9] }, 1: { 0: 2 } } -> entry 2 is id only and new -> 4.00 at the second entry */
+static const uint8_t kTableCollectionLaterEntryFails[] = {
+  0xa2, 0x00, 0xa3, 0x00, 0x01, 0x0d, 0x01, 0x07, 0x81, 0x09,
+  0x01, 0xa1, 0x00, 0x02
+};
+
+/* { 0: { 0: 1 }, 1: { 0: 2 }, ..., 5: { 0: 6 } } -> 6 entries */
+static const uint8_t kTableSixEntries[] = {
+  0xa6, 0x00, 0xa1, 0x00, 0x01, 0x01, 0xa1, 0x00, 0x02, 0x02, 0xa1, 0x00, 0x03,
+  0x03, 0xa1, 0x00, 0x04, 0x04, 0xa1, 0x00, 0x05, 0x05, 0xa1, 0x00, 0x06
+};
+
+/* { 0: { 0: 1, 13: 1, 7: [9] }, 1: { 0: 1, 13: 2, 7: [9] } } -> id 1 twice */
+static const uint8_t kTableSameIdTwice[] = {
+  0xa2, 0x00, 0xa3, 0x00, 0x01, 0x0d, 0x01, 0x07, 0x81, 0x09,
+  0x01, 0xa3, 0x00, 0x01, 0x0d, 0x02, 0x07, 0x81, 0x09
+};
+
+/* { 0: { 0: 1, 13: 1, 7: [9] }, 1: { 0: 2, 13: 2, 7: [9] } } -> two new entries */
+static const uint8_t kTableTwoNewEntries[] = {
+  0xa2, 0x00, 0xa3, 0x00, 0x01, 0x0d, 0x01, 0x07, 0x81, 0x09,
+  0x01, 0xa3, 0x00, 0x02, 0x0d, 0x02, 0x07, 0x81, 0x09
+};
+
+/* { 0: { 0: 2 } } -> id only for entry 2 */
+static const uint8_t kTableDeleteId2[] = {
+  0xa1, 0x00, 0xa1, 0x00, 0x02
+};
+
+/* the first entry used to be stored although the request was answered 4.00 */
+TEST_F(FpHandlers, RcpCollectionRejectedAtALaterEntryStoresNothing)
+{
+  EXPECT_EQ(invoke_post(core_resource_knx_fp_r, kTableCollectionLaterEntryFails, sizeof(kTableCollectionLaterEntryFails)),
+            oc_status_code(OC_STATUS_BAD_REQUEST));
+  EXPECT_EQ(oc_core_find_index_in_recipient_table_from_id(1), -1);
+}
+
+TEST_F(FpHandlers, PubCollectionRejectedAtALaterEntryStoresNothing)
+{
+  EXPECT_EQ(invoke_post(core_resource_knx_fp_p, kTableCollectionLaterEntryFails, sizeof(kTableCollectionLaterEntryFails)),
+            oc_status_code(OC_STATUS_BAD_REQUEST));
+  EXPECT_EQ(oc_core_find_index_in_publisher_table_from_id(1), -1);
+}
+
+TEST_F(FpHandlers, GoCollectionRejectedAtALaterEntryStoresNothing)
+{
+  /* the href must name a discoverable resource of the device */
+  oc_resource_t *r = oc_ri_alloc_resource();
+  ASSERT_NE(r, nullptr);
+  r->get_handler.cb = fp_dummy_handler;
+  r->properties = OC_DISCOVERABLE;
+  oc_new_string(&r->uri, "/p/x", 4);
+  ASSERT_TRUE(oc_ri_add_resource(r));
+
+  /* { 0: { 0: 1, 11: "/p/x", 8: w, 7: [9] }, 1: { 0: 2 } } */
+  const uint8_t cbor[] = {
+    0xa2, 0x00, 0xa4, 0x00, 0x01, 0x0b, 0x64, '/', 'p', '/', 'x', 0x08, 0x10, 0x07, 0x81, 0x09,
+    0x01, 0xa1, 0x00, 0x02
+  };
+  EXPECT_EQ(invoke_post(core_resource_knx_fp_g, cbor, sizeof(cbor)), oc_status_code(OC_STATUS_BAD_REQUEST));
+  EXPECT_EQ(oc_core_find_index_in_group_object_table_from_id(1), -1);
+
+  oc_free_string(&r->uri);
+  oc_ri_delete_resource(r);
+}
+
+TEST_F(FpHandlers, RcpCollectionWithMoreThanFiveEntriesIsRejectedWith413)
+{
+  EXPECT_EQ(invoke_post(core_resource_knx_fp_r, kTableSixEntries, sizeof(kTableSixEntries)),
+            oc_status_code(OC_STATUS_REQUEST_ENTITY_TOO_LARGE));
+}
+
+/* the second entry used to overwrite the first ("last wins") */
+TEST_F(FpHandlers, RcpSameIdTwiceInOneRequestIsRejected)
+{
+  EXPECT_EQ(invoke_post(core_resource_knx_fp_r, kTableSameIdTwice, sizeof(kTableSameIdTwice)),
+            oc_status_code(OC_STATUS_BAD_REQUEST));
+  EXPECT_EQ(oc_core_find_index_in_recipient_table_from_id(1), -1);
+}
+
+/* the entries are committed after the check, so each new entry claims its own free slot */
+TEST_F(FpHandlers, RcpTwoNewEntriesInOneRequestGetTwoSlots)
+{
+  ASSERT_EQ(invoke_post(core_resource_knx_fp_r, kTableTwoNewEntries, sizeof(kTableTwoNewEntries)),
+            oc_status_code(OC_STATUS_CREATED));
+
+  const int index1 = oc_core_find_index_in_recipient_table_from_id(1);
+  const int index2 = oc_core_find_index_in_recipient_table_from_id(2);
+  ASSERT_NE(index1, -1);
+  ASSERT_NE(index2, -1);
+  EXPECT_NE(index1, index2);
+  EXPECT_EQ(oc_core_get_recipient_table_entry(index1)->grpid, 1u);
+  EXPECT_EQ(oc_core_get_recipient_table_entry(index2)->grpid, 2u);
+
+  EXPECT_EQ(invoke_post(core_resource_knx_fp_r, kTableDeleteId1, sizeof(kTableDeleteId1)),
+            oc_status_code(OC_STATUS_CHANGED));
+  EXPECT_EQ(invoke_post(core_resource_knx_fp_r, kTableDeleteId2, sizeof(kTableDeleteId2)),
+            oc_status_code(OC_STATUS_CHANGED));
+}
+
 /* ───────── POST handlers: an update with only a member without own seen bit ─
 
    An int member other than the id (here the unknown key 99) sets only

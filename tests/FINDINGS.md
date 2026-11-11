@@ -598,7 +598,7 @@ removed entry. The next number is F-078.
 - **Possible fix:** in the three `case OC_REP_NIL`: a key other than 7 -> free the tmp entry and answer 4.00 (as in `default`). Tests: one per table, `{0: <id>, 11: []}` on an existing entry -> 4.00 and the entry unchanged (GO fails today: deleted; PUB / RCP fail today: 2.04).
 - **Fix:** `/fp/g`: the `case OC_REP_NIL` is removed, an empty array on ANY key falls into `default` -> 4.00, nothing changed (a GO needs at least one ga, spec 2.5.7.3.2 Table 18; no other GO member is an array). `/fp/p`, `/fp/r`: `OC_REP_NIL` on a key other than 7 -> 4.00 (tmp entry freed), the empty ga (7) stays accepted for multicast. Tests: `test_oc_knx_fp`, `FpHandlers.GoPostEmptyArrayOnOtherKeyIsRejectedAndKeepsTheEntry`, `PubPostEmptyArrayOnOtherKeyIsRejectedAndKeepsTheEntry`, `RcpPostEmptyArrayOnOtherKeyIsRejectedAndKeepsTheEntry` (`{0: 1, 11: []}` on an existing entry -> 4.00, entry unchanged; all three fail without the fix: GO deleted, PUB / RCP 2.04).
 
-## F-076: a POST /fp/g, /fp/p or /fp/r collection rejected at a later entry leaves the earlier entries stored
+## ~~F-076: a POST /fp/g, /fp/p or /fp/r collection rejected at a later entry leaves the earlier entries stored~~ - FIXED
 
 - **Files:** `api/oc_knx_fp.c`, `oc_core_fp_g_post_handler()`, the POST handlers of `/fp/p` and `/fp/r` (each entry is checked into its shadow copy and committed (`g_got[entry] = tmp`, `oc_store_..._entry()`) before the next entry is parsed; every 4.00 / 5.00 returns at once).
 - **Severity:** Low / Medium - a collection that fails at a later entry has already stored the earlier entries, but the MaC gets 4.00 / 5.00 and does not know that a part was applied (partial apply, not atomic); no OSCORE contexts are involved (unlike F-071).
@@ -621,6 +621,16 @@ removed entry. The next number is F-078.
   - `oc_free_allocated_group_object_table_elements()` / `oc_free_allocated_group_table_elements()` are `static` and read only the alloc bits (removed from `oc_knx_fp.h`)
   - an empty array on a key other than ga -> 4.00 (F-075), any other unexpected type -> 4.00 (`default`)
 - **Not part of this finding:** a re-POST of an existing entry keeps the members it does not carry (partial update instead of a replace) -> F-077.
+- **Fix:** the three POST handlers in `api/oc_knx_fp.c` work as `/auth/at` (stack array, option A of the plan):
+  - `TBL_POST_MAX_ENTRIES` 5 (the template sends at most 5 entries per request): `tbl_post_entry_count()` counts the entries (top-level objects) before any is processed, more -> 4.13
+  - check pass into `tbl_post_entry_t entries[5]` on the stack: one entry type for all three tables, the shadow copy is a union (`tmp.go` on `/fp/g`, `tmp.gt` on `/fp/p`, `/fp/r`); both table structs start with `int32_t id` (common initial sequence, C11 6.5.2.3), so `tbl_post_has_id()` reads the id of both -> `id` must stay the first member; 5 entries are about 480 bytes on 32 bit
+  - every error (also before a copy exists: id missing, no free slot) goes through `go_post_reject()` / `gt_post_reject()`: frees the current and all earlier copies, answers the error, nothing stored
+  - the same id twice in one request -> 4.00 (`tbl_post_has_id()`)
+  - an id-only delete is recorded (`delete_entry`), not executed in the check pass
+  - commit pass after ALL entries passed, in request order: delete, or release the replaced live values, take over the copy and store it
+  - new entries claim slots with `skip` (`find_empty_slot_in_table(..., skip)`, `find_empty_go_slot(skip)`), the nth new entry gets the nth free slot; the public `find_empty_slot_in_group_object_table()` keeps its signature
+  - conformance 5.5 passes (Docker)
+  - Tests: `test_oc_knx_fp`, `FpHandlers.RcpCollectionRejectedAtALaterEntryStoresNothing`, `PubCollectionRejectedAtALaterEntryStoresNothing`, `GoCollectionRejectedAtALaterEntryStoresNothing`, `RcpCollectionWithMoreThanFiveEntriesIsRejectedWith413`, `RcpSameIdTwiceInOneRequestIsRejected` (all five fail without the fix), `RcpTwoNewEntriesInOneRequestGetTwoSlots` (guards the slot claim).
 
 ## ~~F-077: a POST /fp/r or /fp/p to an existing entry keeps the members it does not carry, a switch between unicast and multicast does not take effect~~ - FIXED
 
