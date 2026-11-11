@@ -7,6 +7,9 @@
  * SPDX-License-Identifier: Apache-2.0 AND BSD-3-Clause
  *
  * This file is part of the Contiki operating system.
+ *
+ * This file was created with the assistance of AI tools.
+ * Copyright 2026 KNXA (to the extent protectable under applicable law)
  */
 
 #include "oc_process.h"
