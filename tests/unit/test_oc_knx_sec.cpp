@@ -740,8 +740,8 @@ TEST_F(SecHandlers, AtEntryDeleteRemovesTheTokensObservers)
 
 /*
   An AT entry may only be CREATED once all five mandatory properties are
-  present (id, profile, scope, cnf:osc:id, cnf:osc:ms). The handler counts them
-  in `at_properties_seen`.
+  present (id, profile, scope, cnf:osc:id, cnf:osc:ms). The handler records them
+  in the AT_SEEN_* bits of `member_flags`.
 
   The payloads are hand-encoded because the point of the second test is a
   repeated map key, which no CBOR writer will emit from a dictionary.

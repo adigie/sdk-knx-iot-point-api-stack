@@ -662,42 +662,61 @@ static void oc_core_auth_at_get_handler(oc_request_t* request, oc_interface_mask
   OC_INF("oc_core_auth_at_get_handler - end");
 }
 
-// identifiers of the elements a POST /auth/at request replaced in its shadow copy (as TABLE_AT_REF/TABLE_GAS on fp/r)
-#define AT_ALLOC_OSC_ID        (1u << 0)
-#define AT_ALLOC_OSC_MS        (1u << 1)
-#define AT_ALLOC_OSC_SALT      (1u << 2)
-#define AT_ALLOC_OSC_CONTEXTID (1u << 3)
-#define AT_ALLOC_GA            (1u << 4)
+/*
+  member flags of ONE access token of a POST /auth/at request (uint16_t)
+
+  - low byte  AT_SEEN_*  -> the member is in the request (mandatory check, cnf present, salt/contextId carried)
+                            a bitmask, not a counter: a repeated CBOR key survives oc_parse_rep() as a separate rep,
+                            so counting occurrences would let one member repeated five times stand in for all five mandatory ones
+  - high byte AT_ALLOC_* -> the value was allocated in the shadow copy (as TABLE_AT_REF/TABLE_GAS on fp/r)
+                            freed from the copy on a reject, released from the live entry on commit
+*/
+#define AT_SEEN_ID             (1u << 0)
+#define AT_SEEN_SCOPE          (1u << 1)
+#define AT_SEEN_PROFILE        (1u << 2)
+#define AT_SEEN_CNF            (1u << 3)
+#define AT_SEEN_OSC_ID         (1u << 4)
+#define AT_SEEN_OSC_MS         (1u << 5)
+#define AT_SEEN_OSC_SALT       (1u << 6)
+#define AT_SEEN_OSC_CONTEXTID  (1u << 7)
+#define AT_SEEN_MANDATORY      (AT_SEEN_ID | AT_SEEN_SCOPE | AT_SEEN_PROFILE | AT_SEEN_OSC_ID | AT_SEEN_OSC_MS)
+
+#define AT_ALLOC_OSC_ID        (1u << 8)
+#define AT_ALLOC_OSC_MS        (1u << 9)
+#define AT_ALLOC_OSC_SALT      (1u << 10)
+#define AT_ALLOC_OSC_CONTEXTID (1u << 11)
+#define AT_ALLOC_GA            (1u << 12)
 
 /*
-  frees the elements of 'entry' flagged in 'allocator' (a set bit = the element was replaced in the shadow copy)
-  - (&tmp, allocator) on a rejected request -> drops the new values, the live entry stays as it was
-  - (live, allocator) before '*live = tmp' -> drops the replaced old values, no leak
+  frees the elements of 'entry' flagged AT_ALLOC_* in 'member_flags' (a set bit = the element was replaced in the shadow copy)
+  - (&tmp, member_flags) on a rejected request -> drops the new values, the live entry stays as it was
+  - (live, member_flags) before '*live = tmp' -> drops the replaced old values, no leak
   - AT_ALLOC_GA is also set when a string scope removed the ga array (tmp.ga = NULL), free ignores NULL ptr
+  - the AT_SEEN_* bits are ignored here
 */
-static void oc_free_allocated_at_elements(oc_auth_at_t* entry, uint8_t allocator)
+static void oc_free_allocated_at_elements(oc_auth_at_t* entry, uint16_t member_flags)
 {
-  if (allocator & AT_ALLOC_OSC_ID)
+  if (member_flags & AT_ALLOC_OSC_ID)
   {
     oc_free_string(&entry->osc_id);
   }
 
-  if (allocator & AT_ALLOC_OSC_MS)
+  if (member_flags & AT_ALLOC_OSC_MS)
   {
     oc_free_string(&entry->osc_ms);
   }
 
-  if (allocator & AT_ALLOC_OSC_SALT)
+  if (member_flags & AT_ALLOC_OSC_SALT)
   {
     oc_free_string(&entry->osc_salt);
   }
 
-  if (allocator & AT_ALLOC_OSC_CONTEXTID)
+  if (member_flags & AT_ALLOC_OSC_CONTEXTID)
   {
     oc_free_string(&entry->osc_contextid);
   }
 
-  if (allocator & AT_ALLOC_GA)
+  if (member_flags & AT_ALLOC_GA)
   {
     free(entry->ga);
     entry->ga = NULL;
@@ -714,7 +733,7 @@ typedef struct
   oc_auth_at_t tmp;           // shadow copy with the new values
   oc_auth_at_t* at_entry;     // live slot: the existing token, or the empty slot claimed for a new one
   const oc_string_t* id;      // access token id, points into the request payload
-  uint8_t allocator;          // AT_ALLOC_* elements owned by 'tmp'
+  uint16_t member_flags;      // AT_SEEN_* / AT_ALLOC_* of 'tmp' (AT_ALLOC_* elements are owned by 'tmp')
   bool delete_entry;          // case c: id only on an existing token
   bool free_contexts;         // the key (cnf values or profile) changed -> the contexts of the token are freed on commit
 } at_post_entry_t;
@@ -723,14 +742,14 @@ typedef struct
   a rejected POST /auth/at changes nothing
   - releases the current entry and the shadow copies of all older entries checked before, responds the error
 */
-static void at_post_reject(oc_request_t* request, at_post_entry_t* entries, int entry_count, oc_auth_at_t* tmp, uint8_t allocator, oc_status_t error)
+static void at_post_reject(oc_request_t* request, at_post_entry_t* entries, int entry_count, oc_auth_at_t* tmp, uint16_t member_flags, oc_status_t error)
 {
-  // current 
-  oc_free_allocated_at_elements(tmp, allocator);
+  // current
+  oc_free_allocated_at_elements(tmp, member_flags);
 
   for (int i = 0; i < entry_count; i++)
   { // older
-    oc_free_allocated_at_elements(&entries[i].tmp, entries[i].allocator);
+    oc_free_allocated_at_elements(&entries[i].tmp, entries[i].member_flags);
   }
   oc_prepare_no_format_response_no_payload(request, error);
 }
@@ -880,23 +899,11 @@ static void oc_core_auth_at_post_handler(oc_request_t* request, oc_interface_mas
       }
 
       /*
-        A bitmask, not a counter: a repeated CBOR key survives oc_parse_rep() as
-        a separate rep, so counting occurrences would let one property repeated
-        five times stand in for all five mandatory ones.
-      */
-      #define AT_PROP_ID      (1u << 0)
-      #define AT_PROP_SCOPE   (1u << 1)
-      #define AT_PROP_PROFILE (1u << 2)
-      #define AT_PROP_OSC_ID  (1u << 3)
-      #define AT_PROP_OSC_MS  (1u << 4)
-      #define AT_PROP_CNF     (1u << 5)
-      #define MANDATORY_AT_PROPERTIES (AT_PROP_ID | AT_PROP_SCOPE | AT_PROP_PROFILE | AT_PROP_OSC_ID | AT_PROP_OSC_MS)
-
-      /*
         shadow copy (as for POST on fp/g, fp/p, fp/r): all properties are written to 'tmp', the live entry changes only once ALL checks passed
         - a rejected request (4.00/5.00) leaves an existing token as it was, a new one leaves its slot empty
         - the access token id is written to the entry as the LAST step (see 'b + d' below)
-        - a new value gets its own allocation, flagged in 'allocator'; an element not in the payload stays shared with the live entry
+        - a new value gets its own allocation, flagged AT_ALLOC_* in 'member_flags'; an element not in the payload stays shared with the
+          live entry
 
         repeated key in one access token
         - accepted, the last one wins (as on fp/g, fp/p, fp/r)
@@ -904,11 +911,9 @@ static void oc_core_auth_at_post_handler(oc_request_t* request, oc_interface_mas
         - a value shared with the live entry (bit not set) is NOT freed there, the commit below releases it
       */
       oc_auth_at_t tmp = *at_entry;
-      uint8_t allocator = 0;
+      uint16_t member_flags = AT_SEEN_ID;
 
       bool id_only = true; // used to delete the AT table entry
-
-      unsigned int at_properties_seen = AT_PROP_ID;
 
       while (object)
       {
@@ -952,12 +957,12 @@ static void oc_core_auth_at_post_handler(oc_request_t* request, oc_interface_mas
             if (acl_scopes == OC_ACL_NONE)
             {
               OC_ERR("No valid access scope was set!");
-              at_post_reject(request, entries, entry_count, &tmp, allocator, OC_STATUS_BAD_REQUEST);
+              at_post_reject(request, entries, entry_count, &tmp, member_flags, OC_STATUS_BAD_REQUEST);
               return;
             }
 
             // release a ga array of this request (repeated key), a live one is released by the commit, free ignores NULL ptr
-            if (allocator & AT_ALLOC_GA)
+            if (member_flags & AT_ALLOC_GA)
             {
               free(tmp.ga);
             }
@@ -965,11 +970,8 @@ static void oc_core_auth_at_post_handler(oc_request_t* request, oc_interface_mas
             // in case of scopes the GA/GA len property is not used, the bit makes the commit release a live ga array
             tmp.ga = NULL;
             tmp.ga_len = 0;
-            allocator |= AT_ALLOC_GA;
-
-            // scopes (compacted bits)
-            tmp.scope = acl_scopes;
-            at_properties_seen |= AT_PROP_SCOPE;
+            tmp.scope = acl_scopes; // compacted bits
+            member_flags |= AT_SEEN_SCOPE | AT_ALLOC_GA;
           }
         }
         else if (object->type == OC_REP_INT_ARRAY)
@@ -988,7 +990,7 @@ static void oc_core_auth_at_post_handler(oc_request_t* request, oc_interface_mas
             if (array_size == 0)
             {
               OC_ERR("No valid access GA scope was set!");
-              at_post_reject(request, entries, entry_count, &tmp, allocator, OC_STATUS_BAD_REQUEST);
+              at_post_reject(request, entries, entry_count, &tmp, member_flags, OC_STATUS_BAD_REQUEST);
               return;
             }
 
@@ -996,7 +998,7 @@ static void oc_core_auth_at_post_handler(oc_request_t* request, oc_interface_mas
             if (!new_array)
             {
               OC_ERR("Out of stack memory!");
-              at_post_reject(request, entries, entry_count, &tmp, allocator, OC_STATUS_INTERNAL_SERVER_ERROR);
+              at_post_reject(request, entries, entry_count, &tmp, member_flags, OC_STATUS_INTERNAL_SERVER_ERROR);
               return;
             }
 
@@ -1008,14 +1010,13 @@ static void oc_core_auth_at_post_handler(oc_request_t* request, oc_interface_mas
             OC_DBG("ga size %d", array_size);
 
             // release a ga array of this request (repeated key), a live one is released by the commit, free ignores NULL ptr
-            if (allocator & AT_ALLOC_GA)
+            if (member_flags & AT_ALLOC_GA)
             {
               free(tmp.ga);
             }
 
             tmp.ga_len = array_size;
             tmp.ga = new_array;
-            allocator |= AT_ALLOC_GA;
 
             /*
               define THIS auth at token below with <ga> scope 's-mode messaging',
@@ -1024,7 +1025,7 @@ static void oc_core_auth_at_post_handler(oc_request_t* request, oc_interface_mas
               - is used only in combination with a present ga array / array len (see above)
             */
             tmp.scope = OC_ACL_GA;
-            at_properties_seen |= AT_PROP_SCOPE;
+            member_flags |= AT_SEEN_SCOPE | AT_ALLOC_GA;
           }
         }
         else if (object->type == OC_REP_STRING)
@@ -1047,7 +1048,7 @@ static void oc_core_auth_at_post_handler(oc_request_t* request, oc_interface_mas
           if (object->iname == 38)
           {
             tmp.profile = (oc_at_profile_t)object->value.integer;
-            at_properties_seen |= AT_PROP_PROFILE;
+            member_flags |= AT_SEEN_PROFILE;
 
             // the profile decides whether an OSCORE context exists at all -> the contexts must be re-initialized
             key_material_updated = true;
@@ -1061,7 +1062,7 @@ static void oc_core_auth_at_post_handler(oc_request_t* request, oc_interface_mas
           // cnf (8): only allowed in a full token, see the check after the loop
           if (object->iname == 8)
           {
-            at_properties_seen |= AT_PROP_CNF;
+            member_flags |= AT_SEEN_CNF;
           }
 
           // level of cnf:xxx
@@ -1088,7 +1089,7 @@ static void oc_core_auth_at_post_handler(oc_request_t* request, oc_interface_mas
                     if (oscore_object->value.integer != 10)
                     {
                       OC_ERR("algorithm is not 10 : %d", (int)oscore_object->value.integer);
-                      at_post_reject(request, entries, entry_count, &tmp, allocator, OC_STATUS_BAD_REQUEST);
+                      at_post_reject(request, entries, entry_count, &tmp, member_flags, OC_STATUS_BAD_REQUEST);
                       return;
                     }
 
@@ -1108,7 +1109,7 @@ static void oc_core_auth_at_post_handler(oc_request_t* request, oc_interface_mas
                     if (mastersecret_size < OSCORE_KEY_LEN || mastersecret_size > OSCORE_MASTER_SECRET_LEN)
                     {
                       OC_ERR("master secret size must be in range 16 ... 32: %u", mastersecret_size);
-                      at_post_reject(request, entries, entry_count, &tmp, allocator, OC_STATUS_BAD_REQUEST);
+                      at_post_reject(request, entries, entry_count, &tmp, member_flags, OC_STATUS_BAD_REQUEST);
                       return;
                     }
 
@@ -1117,20 +1118,18 @@ static void oc_core_auth_at_post_handler(oc_request_t* request, oc_interface_mas
                     {
 
                       OC_ERR("master secret with len %u content cannot be zero : ", mastersecret_size);
-                      at_post_reject(request, entries, entry_count, &tmp, allocator, OC_STATUS_BAD_REQUEST);
+                      at_post_reject(request, entries, entry_count, &tmp, member_flags, OC_STATUS_BAD_REQUEST);
                       return;
                     }
 
                     // repeated key: release the value of this request only (see shadow copy above)
-                    if (allocator & AT_ALLOC_OSC_MS)
+                    if (member_flags & AT_ALLOC_OSC_MS)
                     {
                       oc_free_string(&tmp.osc_ms);
                     }
                     oc_new_byte_string(&tmp.osc_ms, mastersecret_ptr, mastersecret_size);
-                    allocator |= AT_ALLOC_OSC_MS;
-
+                    member_flags |= AT_SEEN_OSC_MS | AT_ALLOC_OSC_MS;
                     key_material_updated = true;
-                    at_properties_seen |= AT_PROP_OSC_MS;
                   }
                   else if (cnf_object_nr == 8 && oscore_object_nr == 4 && oscore_object->iname == 6)
                   {
@@ -1142,16 +1141,16 @@ static void oc_core_auth_at_post_handler(oc_request_t* request, oc_interface_mas
                     if (id_context_size > OSCORE_ID_CONTEXT_LEN)
                     {
                       OC_ERR("id context size to big : %zu", id_context_size);
-                      at_post_reject(request, entries, entry_count, &tmp, allocator, OC_STATUS_BAD_REQUEST);
+                      at_post_reject(request, entries, entry_count, &tmp, member_flags, OC_STATUS_BAD_REQUEST);
                       return;
                     }
 
-                    if (allocator & AT_ALLOC_OSC_CONTEXTID)
+                    if (member_flags & AT_ALLOC_OSC_CONTEXTID)
                     {
                       oc_free_string(&tmp.osc_contextid);
                     }
                     oc_new_byte_string(&tmp.osc_contextid, oc_string(oscore_object->value.string), id_context_size);
-                    allocator |= AT_ALLOC_OSC_CONTEXTID;
+                    member_flags |= AT_SEEN_OSC_CONTEXTID | AT_ALLOC_OSC_CONTEXTID;
                     key_material_updated = true;
                   }
                   else if (cnf_object_nr == 8 && oscore_object_nr == 4 && oscore_object->iname == 0)
@@ -1164,29 +1163,28 @@ static void oc_core_auth_at_post_handler(oc_request_t* request, oc_interface_mas
                     if (sender_id_size > OSCORE_SENDER_ID_LEN)
                     {
                       OC_ERR("sender id size to big : %zu", sender_id_size);
-                      at_post_reject(request, entries, entry_count, &tmp, allocator, OC_STATUS_BAD_REQUEST);
+                      at_post_reject(request, entries, entry_count, &tmp, member_flags, OC_STATUS_BAD_REQUEST);
                       return;
                     }
 
-                    if (allocator & AT_ALLOC_OSC_ID)
+                    if (member_flags & AT_ALLOC_OSC_ID)
                     {
                       oc_free_string(&tmp.osc_id);
                     }
                     oc_new_byte_string(&tmp.osc_id, oc_string(oscore_object->value.string), sender_id_size);
-                    allocator |= AT_ALLOC_OSC_ID;
+                    member_flags |= AT_SEEN_OSC_ID | AT_ALLOC_OSC_ID;
                     key_material_updated = true;
-                    at_properties_seen |= AT_PROP_OSC_ID;
                   }
                   else if (cnf_object_nr == 8 && oscore_object_nr == 4 && oscore_object->iname == 5)
                   {
                     // cnf:osc:salt (8:4:5), RFC 9003 max 255 bytes on JSON ....
 
-                    if (allocator & AT_ALLOC_OSC_SALT)
+                    if (member_flags & AT_ALLOC_OSC_SALT)
                     {
                       oc_free_string(&tmp.osc_salt);
                     }
                     oc_new_byte_string(&tmp.osc_salt, oc_string(oscore_object->value.string), oc_string_len(oscore_object->value.string));
-                    allocator |= AT_ALLOC_OSC_SALT;
+                    member_flags |= AT_SEEN_OSC_SALT | AT_ALLOC_OSC_SALT;
                     key_material_updated = true;
                   }
                 }
@@ -1222,12 +1220,12 @@ static void oc_core_auth_at_post_handler(oc_request_t* request, oc_interface_mas
         OC_DBG("only found id in request, deleting entry...");
         entries[entry_count++] = (at_post_entry_t){ .at_entry = at_entry, .id = access_token_id, .delete_entry = true };
       }
-      else if ((return_status == OC_STATUS_CREATED || at_properties_seen & AT_PROP_CNF) &&
-               (at_properties_seen & MANDATORY_AT_PROPERTIES) != MANDATORY_AT_PROPERTIES)
+      else if ((return_status == OC_STATUS_CREATED || member_flags & AT_SEEN_CNF) &&
+               (member_flags & AT_SEEN_MANDATORY) != AT_SEEN_MANDATORY)
       {
         // a + e
         OC_WRN("mandatory items missing, entry not created / cnf not updated");
-        at_post_reject(request, entries, entry_count, &tmp, allocator, OC_STATUS_BAD_REQUEST);
+        at_post_reject(request, entries, entry_count, &tmp, member_flags, OC_STATUS_BAD_REQUEST);
         return;
       }
       else
@@ -1240,20 +1238,20 @@ static void oc_core_auth_at_post_handler(oc_request_t* request, oc_interface_mas
           - the shadow copy started as a copy of the live entry -> an optional osc member the request does not carry
             would keep its OLD value (old salt in the key derivation, old contextId as 'kid_context')
           - absent = none (spec 3.6.2 Table 50: salt default empty, contextId omitted on a receiving device)
-          -> set to empty with its allocator bit: the commit frees the old value, a reject frees the empty copy
+          -> set to empty with its AT_ALLOC_* bit: the commit frees the old value, a reject frees the empty copy
         */
-        if (at_properties_seen & AT_PROP_CNF)
+        if (member_flags & AT_SEEN_CNF)
         {
-          if (!(allocator & AT_ALLOC_OSC_SALT))
+          if (!(member_flags & AT_SEEN_OSC_SALT))
           {
             oc_new_byte_string(&tmp.osc_salt, "", 0);
-            allocator |= AT_ALLOC_OSC_SALT;
+            member_flags |= AT_ALLOC_OSC_SALT;
           }
 
-          if (!(allocator & AT_ALLOC_OSC_CONTEXTID))
+          if (!(member_flags & AT_SEEN_OSC_CONTEXTID))
           {
             oc_new_byte_string(&tmp.osc_contextid, "", 0);
-            allocator |= AT_ALLOC_OSC_CONTEXTID;
+            member_flags |= AT_ALLOC_OSC_CONTEXTID;
           }
         }
 
@@ -1276,13 +1274,13 @@ static void oc_core_auth_at_post_handler(oc_request_t* request, oc_interface_mas
             and 5.10.5.2 protected with this token itself) keeps its contexts (a), such a request still gets its response
         */
         const bool key_changed = return_status == OC_STATUS_CHANGED && (tmp.profile != at_entry->profile
-                      || (at_properties_seen & AT_PROP_CNF
+                      || (member_flags & AT_SEEN_CNF
                       && (oc_byte_string_cmp(tmp.osc_id, at_entry->osc_id) != 0
                           || oc_byte_string_cmp(tmp.osc_ms, at_entry->osc_ms) != 0
                           || oc_byte_string_cmp(tmp.osc_salt, at_entry->osc_salt) != 0
                           || oc_byte_string_cmp(tmp.osc_contextid, at_entry->osc_contextid) != 0)));
 
-        entries[entry_count++] = (at_post_entry_t){ .tmp = tmp, .at_entry = at_entry, .id = access_token_id, .allocator = allocator,
+        entries[entry_count++] = (at_post_entry_t){ .tmp = tmp, .at_entry = at_entry, .id = access_token_id, .member_flags = member_flags,
                                                     .free_contexts = key_changed };
       }
     }
@@ -1305,7 +1303,7 @@ static void oc_core_auth_at_post_handler(oc_request_t* request, oc_interface_mas
       }
 
       // release the replaced values of the live entry, then take over the shadow copy
-      oc_free_allocated_at_elements(pending->at_entry, pending->allocator);
+      oc_free_allocated_at_elements(pending->at_entry, pending->member_flags);
 
       *pending->at_entry = pending->tmp;
 
