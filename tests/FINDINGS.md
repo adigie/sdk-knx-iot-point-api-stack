@@ -5,7 +5,7 @@ Defects in the stack found by its tests that are still open.
 A finding is removed once it is fixed (its test then asserts the corrected
 behaviour) or withdrawn. Numbers are never reused, and tests and comments
 keep citing them: `git log -p -S "F-NNN" -- tests/FINDINGS.md` shows a
-removed entry. The next number is F-077.
+removed entry. The next number is F-078.
 
 ## ~~F-029: `oc_endpoint_print()` frees an uninitialized string for non-IPv6 endpoints~~ - FIXED
 
@@ -620,5 +620,42 @@ removed entry. The next number is F-077.
   - `bool id_only` replaced by `MF_SEEN_OTHER` and `mf_is_id_only()` (case c: only the id alone deletes)
   - `oc_free_allocated_group_object_table_elements()` / `oc_free_allocated_group_table_elements()` are `static` and read only the alloc bits (removed from `oc_knx_fp.h`)
   - an empty array on a key other than ga -> 4.00 (F-075), any other unexpected type -> 4.00 (`default`)
-- **Open question (not part of this finding):** a re-POST of an existing entry keeps the optional members it does not carry (the shadow copy starts from the live entry), e.g. an RCP entry re-POSTed as multicast keeps its old `at`; spec 2.5.7.3.1 Table 17 / 2.5.7.4.1 Table 20 say "Existing elements are replaced", the handlers implement a partial update (case d) -> to be decided against the spec (as F-073 on `/auth/at`).
+- **Not part of this finding:** a re-POST of an existing entry keeps the members it does not carry (partial update instead of a replace) -> F-077.
+
+## ~~F-077: a POST /fp/r or /fp/p to an existing entry keeps the members it does not carry, a switch between unicast and multicast does not take effect~~ - FIXED
+
+- **Files:** `api/oc_knx_fp.c`, POST handlers of `/fp/r` and `/fp/p` (shadow copy from the live entry `tmp = g_grt[index]` / `g_gpt[index]`, case d "changed + 1...n elements = update", mandatory check only on create (a0), check a1 "ia and grpid cannot be in the same table entry" on the members of the request only); `api/oc_knx_client.c` (send path decides by `grpid > 0`); the same structure on `/fp/g`.
+- **Severity:** Medium - a MaC that switches a recipient from multicast to unicast gets 2.04, but the entry keeps its `grpid` and the device keeps sending multicast; a switch from unicast to multicast leaves a stale `ia` / `at` in the entry.
+- **Description:**
+  - spec 2.5.7.4.2 Table 21: a recipient entry is EITHER a direct unicast (`ia`, `at`, `fid`: "C u") OR a multicast exchange (`grpid`, `scop`, `iid`: "C m"); `id` and `ga` are mandatory
+  - spec 2.5.7.4.1 Table 20 (and 2.5.7.3.1 Table 17 for `/fp/g`): "Single elements are identified by their 'id'. Existing elements are replaced, and not existing elements are added." -> a POST to an existing id replaces the element; the spec does not forbid a change between unicast and multicast
+  - the handlers start the shadow copy from the live entry and overwrite only the members of the request -> a member not carried keeps its OLD value
+  - mc -> uc, `{0: 1, 7: [..], 12: <ia>, 14: "<at>"}` on a multicast entry: the old `grpid` stays, `ia` / `at` are added; a1 sees only `ia` in the request and passes; the send path takes `grpid > 0` -> still multicast
+  - uc -> mc, `{0: 1, 7: [..], 13: <grpid>}` on a unicast entry: `ia` / `at` stay; `grpid > 0` -> multicast, the entry carries a stale `ia` / `at` (`oc_is_unicast_recipient_access_token()` excludes it only through `grpid == 0`)
+  - a1 (`(member_flags & TARGET_..._PROPERTIES) == TARGET_..._PROPERTIES`): `ia` and `grpid` in the SAME request -> 4.00, correct and kept (no unit test pins it today)
+  - but a1 checks only the request, not the resulting entry -> a request with only `ia` on a stored multicast entry (or only `grpid` on a unicast one) stores an entry with `ia` AND `grpid` without a 4.00
+  - such an entry is sent by the FIRST `if` of the send path (`grpid > 0` -> mc, else uc), grpid has precedence (documented there):
+
+    | stored | added by the update | entry | sent as |
+    |---|---|---|---|
+    | `ia` (+ `at`) | `grpid` | `ia`, `at`, `grpid` | mc (the old `ia` / `at` stay unused) |
+    | `grpid` | `ia` (+ `at`) | `grpid`, `ia`, `at` | mc (the switch to uc does not take effect) |
+  - the mandatory members (`ga`, one of `ia` / `grpid`) are checked only on create (a0), an update is never checked against them
+- **Evidence:** code reading.
+- **Expected:** a POST to an existing id replaces the entry: the result holds exactly the members of the request (members not carried are cleared, as F-073 on `/auth/at`), and the result passes the same checks as a create: a0 (mandatory `ga`, exactly one of `ia` / `grpid`) and a1 (`ia` and `grpid` not both).
+- **Possible fix:**
+  - on an existing id (case d), start the shadow copy from an EMPTY entry (id only) instead of the live entry; the commit releases all allocated members of the live entry (`TBL_ALLOC_AT`, `TBL_ALLOC_GA`, url) and takes over the copy
+  - run a0 and a1 for create AND update (on the request flags, which then describe the whole entry)
+  - minimum, if the partial update is kept: a1 on the resulting entry (`tmp.ia` set AND `tmp.grpid > 0` -> 4.00), so a half-switched entry can not be stored
+  - the same decision for `/fp/g` (all four members are mandatory there, a replace then needs all of them)
+- **Tests:** `ia` and `grpid` in one request -> 4.00 (pins a1, passes today); mc entry re-POSTed as uc -> `grpid` cleared, unicast send; uc entry re-POSTed as mc -> `ia` / `at` cleared; with the minimum fix: a mc entry updated with only `ia` -> 4.00 (fails today: 2.04, entry with both).
+- **Why not a full replace:** the conformance template (5.5 "Function point tables") sends partial updates and expects 2.04: `/fp/g` `{id, ga}`, `{id, cflag}`, `{id, href}` ("'ga' / 'cflags' / 'href' change"), `/fp/r` `[{id 2, grpid}, {id 3, ga, grpid}, {id 4, ia}]` on existing entries -> a POST to an existing id stays a partial update, a0 stays create only.
+- **Fix:** the partial update stays; a mode switch by an update is resolved, the mode member of the request wins and the other mode is cleared: `tbl_switch_mode()` in `api/oc_knx_fp.c`, called by the `/fp/p` and `/fp/r` POST handlers after a1:
+  - mc -> uc (`ia` in the request, `grpid` stored): `grpid` = 0 -> the send path (`grpid > 0` first) sends uc
+  - uc -> mc (`grpid` in the request, `ia` stored): `ia` = -1, the ia resolver reset, a stale `at` cleared unless the request carries one (`TBL_ALLOC_AT` -> the commit releases the old string) -> no stale unicast `at` usable for mc (spec 6.3.2.1)
+  - a1 stays on the request: `ia` and `grpid` in one request -> 4.00; an entry never holds both
+  - `fid` / `iid` are not touched (not used for the mode decision)
+  - the comment of the send path (`api/oc_knx_client.c`) states it: an entry never holds both, `grpid > 0` is a safe first test
+  - conformance 5.5 passes (Docker)
+  - Tests: `test_oc_knx_fp`, `FpHandlers.RcpPostIaAndGrpidInOneRequestIsRejected`, `PubPostIaAndGrpidInOneRequestIsRejected` (pin a1, pass also without the fix), `RcpPostIaOnAMulticastEntrySwitchesToUnicast`, `RcpPostGrpidOnAUnicastEntrySwitchesToMulticast` (`at` cleared), `PubPostIaOnAMulticastEntrySwitchesToUnicast` (all three fail without the switch: the old mode stays).
 

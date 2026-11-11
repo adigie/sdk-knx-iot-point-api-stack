@@ -1487,6 +1487,103 @@ TEST_F(FpHandlers, GoPostEmptyArrayOnOtherKeyIsRejectedAndKeepsTheEntry)
   oc_ri_delete_resource(r);
 }
 
+/* ───────── POST handlers: a1, an entry is either uc (ia) or mc (grpid) ──────
+
+   ia and grpid in one request -> 4.00. An update keeps the members it does
+   not carry; ia on a stored mc entry (or grpid on a stored uc entry) switches
+   the mode: the member of the request wins, the other mode is cleared. */
+
+/* { 0: { 0: 2, 12: 5, 13: 1, 7: [9] } } -> ia and grpid in one request */
+static const uint8_t kTableIaAndGrpid[] = {
+  0xa1, 0x00, 0xa4, 0x00, 0x02, 0x0c, 0x05, 0x0d, 0x01, 0x07, 0x81, 0x09
+};
+
+/* { 0: { 0: 1, 12: 5 } } -> only ia */
+static const uint8_t kTableOnlyIa[] = {
+  0xa1, 0x00, 0xa2, 0x00, 0x01, 0x0c, 0x05
+};
+
+/* { 0: { 0: 1, 12: 5, 14: "t", 7: [9] } } -> unicast entry 1 with an access token */
+static const uint8_t kTableCreateUnicast[] = {
+  0xa1, 0x00, 0xa4, 0x00, 0x01, 0x0c, 0x05, 0x0e, 0x61, 't', 0x07, 0x81, 0x09
+};
+
+/* { 0: { 0: 1, 13: 1 } } -> only grpid */
+static const uint8_t kTableOnlyGrpid[] = {
+  0xa1, 0x00, 0xa2, 0x00, 0x01, 0x0d, 0x01
+};
+
+TEST_F(FpHandlers, RcpPostIaAndGrpidInOneRequestIsRejected)
+{
+  EXPECT_EQ(invoke_post(core_resource_knx_fp_r, kTableIaAndGrpid, sizeof(kTableIaAndGrpid)),
+            oc_status_code(OC_STATUS_BAD_REQUEST));
+  EXPECT_EQ(oc_core_find_index_in_recipient_table_from_id(2), -1);
+}
+
+TEST_F(FpHandlers, PubPostIaAndGrpidInOneRequestIsRejected)
+{
+  EXPECT_EQ(invoke_post(core_resource_knx_fp_p, kTableIaAndGrpid, sizeof(kTableIaAndGrpid)),
+            oc_status_code(OC_STATUS_BAD_REQUEST));
+  EXPECT_EQ(oc_core_find_index_in_publisher_table_from_id(2), -1);
+}
+
+/* mc -> uc: ia on a mc entry clears grpid (it used to keep grpid, the entry stayed mc) */
+TEST_F(FpHandlers, RcpPostIaOnAMulticastEntrySwitchesToUnicast)
+{
+  ASSERT_EQ(invoke_post(core_resource_knx_fp_r, kGroupTableCreate, sizeof(kGroupTableCreate)),
+            oc_status_code(OC_STATUS_CREATED));
+
+  EXPECT_EQ(invoke_post(core_resource_knx_fp_r, kTableOnlyIa, sizeof(kTableOnlyIa)), oc_status_code(OC_STATUS_CHANGED));
+
+  const int index = oc_core_find_index_in_recipient_table_from_id(1);
+  ASSERT_NE(index, -1);
+  oc_group_table_t *e = oc_core_get_recipient_table_entry(index);
+  EXPECT_EQ(e->ia, 5);
+  EXPECT_EQ(e->grpid, 0u);
+
+  EXPECT_EQ(invoke_post(core_resource_knx_fp_r, kTableDeleteId1, sizeof(kTableDeleteId1)),
+            oc_status_code(OC_STATUS_CHANGED));
+}
+
+/* uc -> mc: grpid on a uc entry clears ia and the stale at (it used to keep both) */
+TEST_F(FpHandlers, RcpPostGrpidOnAUnicastEntrySwitchesToMulticast)
+{
+  ASSERT_EQ(invoke_post(core_resource_knx_fp_r, kTableCreateUnicast, sizeof(kTableCreateUnicast)),
+            oc_status_code(OC_STATUS_CREATED));
+  const int index = oc_core_find_index_in_recipient_table_from_id(1);
+  ASSERT_NE(index, -1);
+  oc_group_table_t *e = oc_core_get_recipient_table_entry(index);
+  ASSERT_EQ(oc_string_len(e->at), 1u);
+
+  EXPECT_EQ(invoke_post(core_resource_knx_fp_r, kTableOnlyGrpid, sizeof(kTableOnlyGrpid)),
+            oc_status_code(OC_STATUS_CHANGED));
+
+  EXPECT_EQ(e->grpid, 1u);
+  EXPECT_EQ(e->ia, -1);
+  EXPECT_EQ(oc_string_len(e->at), 0u);
+
+  EXPECT_EQ(invoke_post(core_resource_knx_fp_r, kTableDeleteId1, sizeof(kTableDeleteId1)),
+            oc_status_code(OC_STATUS_CHANGED));
+}
+
+/* the same on the publisher table: mc -> uc */
+TEST_F(FpHandlers, PubPostIaOnAMulticastEntrySwitchesToUnicast)
+{
+  ASSERT_EQ(invoke_post(core_resource_knx_fp_p, kGroupTableCreate, sizeof(kGroupTableCreate)),
+            oc_status_code(OC_STATUS_CREATED));
+
+  EXPECT_EQ(invoke_post(core_resource_knx_fp_p, kTableOnlyIa, sizeof(kTableOnlyIa)), oc_status_code(OC_STATUS_CHANGED));
+
+  const int index = oc_core_find_index_in_publisher_table_from_id(1);
+  ASSERT_NE(index, -1);
+  oc_group_table_t *e = oc_core_get_publisher_table_entry(index);
+  EXPECT_EQ(e->ia, 5);
+  EXPECT_EQ(e->grpid, 0u);
+
+  EXPECT_EQ(invoke_post(core_resource_knx_fp_p, kTableDeleteId1, sizeof(kTableDeleteId1)),
+            oc_status_code(OC_STATUS_CHANGED));
+}
+
 /* ───────── POST handlers: an update with only a member without own seen bit ─
 
    An int member other than the id (here the unknown key 99) sets only

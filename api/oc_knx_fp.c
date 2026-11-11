@@ -36,6 +36,39 @@ extern const oc_resource_t core_resource_knx_p;
 static void oc_free_allocated_group_object_table_elements(oc_group_object_table_t* entry, uint16_t member_flags);
 static void oc_free_allocated_group_table_elements(oc_group_table_t* entry, uint16_t member_flags);
 
+/*
+  mode switch of a PUB/RCP entry by an update: the mode member of the request wins, the members of the other mode are cleared
+  - an entry is either uc (ia, at) or mc (grpid), spec 2.5.7.4.2 table 21; ia and grpid in one request were rejected before (a1)
+  - an update keeps the members it does not carry (partial update, as the conformance template expects), so without the
+    switch an entry could hold both:
+    - mc -> uc (ia in the request) : grpid cleared -> the send path tests grpid > 0 first, else it would stay mc
+    - uc -> mc (grpid in the request): ia cleared, the ia resolver reset, a stale at cleared (unless the request carries one)
+      -> an at on a grpid entry is not a unicast 'at' any more, a stale one would be usable for mc (spec 6.3.2.1)
+  - the cleared at is released from the live entry on commit (TBL_ALLOC_AT set)
+*/
+static void tbl_switch_mode(oc_group_table_t* tmp, uint16_t* member_flags)
+{
+  if ((*member_flags & TBL_SEEN_IA) && tmp->grpid > 0)
+  {
+    tmp->grpid = 0;
+  }
+
+  if ((*member_flags & TBL_SEEN_GRPID) && tmp->ia > -1)
+  {
+    tmp->ia = -1;
+    tmp->ipv6_res.resolve_status = OC_IP_STATUS_UNRESOLVED;
+    tmp->ipv6_res.callback = NULL;
+    memset(&tmp->ipv6_adr, 0, sizeof(oc_ipv6_adr_t));
+
+    if (!(*member_flags & TBL_SEEN_AT))
+    {
+      // still the live at (shared), the commit releases it
+      memset(&tmp->at, 0, sizeof(oc_string_t));
+      *member_flags |= TBL_ALLOC_AT;
+    }
+  }
+}
+
 // true if a property of 'all_of' is missing or (if 'one_of' is not 0) none of 'one_of' is present
 static bool tbl_mandatory_missing(unsigned int seen, unsigned int all_of, unsigned int one_of)
 {
@@ -1299,11 +1332,11 @@ static void oc_core_fp_p_post_handler(oc_request_t* request, oc_interface_mask_t
         return;
       }
 
+      // a1: an entry is either uc (ia) or mc (grpid), spec 2.5.7.4.2 table 21 -> ia and grpid in the same request -> 4.00
       if ((member_flags & TARGET_GPT_PROPERTIES) == TARGET_GPT_PROPERTIES)
       { // a1
 
-        // see details on constant
-        OC_ERR("ia and grpid cannot be in the same table entry, no entry created at index: %d", index);
+        OC_ERR("ia and grpid cannot be in the same table entry, no entry stored at index: %d", index);
 
         // on error: free PUB tmp entry (all heap allocations)
         oc_free_allocated_group_table_elements(&tmp_gpt_entry, member_flags);
@@ -1311,6 +1344,9 @@ static void oc_core_fp_p_post_handler(oc_request_t* request, oc_interface_mask_t
         oc_prepare_no_format_response_no_payload(request, OC_STATUS_BAD_REQUEST);
         return;
       }
+
+      // an update with ia on a stored mc entry (or grpid on a stored uc entry) switches the mode
+      tbl_switch_mode(&tmp_gpt_entry, &member_flags);
 
       // b + d, here all ok, set new PUB entry
       OC_INF("storing PUB table at %d", index);
@@ -1940,18 +1976,21 @@ static void oc_core_fp_r_post_handler(oc_request_t* request, oc_interface_mask_t
         return;
       }
 
+      // a1: an entry is either uc (ia, at) or mc (grpid), spec 2.5.7.4.2 table 21 -> ia and grpid in the same request -> 4.00
       if ((member_flags & TARGET_GRT_PROPERTIES) == TARGET_GRT_PROPERTIES)
       { // a1
 
-        // see details on constant
-        OC_ERR("ia and grpid cannot be in the same table entry, no entry created at index: %d", index);
+        OC_ERR("ia and grpid cannot be in the same table entry, no entry stored at index: %d", index);
 
-        // on error: free PUB tmp entry (all heap allocations)
+        // on error: free RCP tmp entry (all heap allocations)
         oc_free_allocated_group_table_elements(&tmp_grt_entry, member_flags);
 
         oc_prepare_no_format_response_no_payload(request, OC_STATUS_BAD_REQUEST);
         return;
       }
+
+      // an update with ia on a stored mc entry (or grpid on a stored uc entry) switches the mode
+      tbl_switch_mode(&tmp_grt_entry, &member_flags);
 
       /*
         ia (12) and at (14) are NOT checked for being together, deliberately
