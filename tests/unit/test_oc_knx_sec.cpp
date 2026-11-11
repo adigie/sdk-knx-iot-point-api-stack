@@ -958,6 +958,37 @@ TEST_F(SecAtPost, RejectedScopeUpdateKeepsTheGaScope)
 }
 
 /*
+  a full token replaces the whole key, an optional osc member it does not carry is empty afterwards
+  - token "tok" created with salt h'5a5a' and contextId h'c1c2'
+  - the same full token POSTed again without salt and contextId -> 2.04
+  - salt and contextId are empty (spec 2.6.7.3: cnf is not updatable in parts; spec 3.6.2: absent = none)
+*/
+TEST_F(SecAtPost, FullTokenWithoutSaltAndContextIdClearsTheOldOnes)
+{
+  std::vector<uint8_t> create = make_complete_at_payload(16, false, 1, 10);
+  create[23] = 0xa5; /* osc map: id, ms, alg + salt, contextId */
+  const uint8_t salt_and_context_id[] = { 0x05, 0x42, 0x5a, 0x5a, 0x06, 0x42, 0xc1, 0xc2 };
+  create.insert(create.end(), std::begin(salt_and_context_id), std::end(salt_and_context_id));
+  ASSERT_EQ(post_at(create.data(), create.size()), oc_status_code(OC_STATUS_CREATED));
+  oc_free_rep(payload);
+  payload = nullptr;
+
+  oc_auth_at_t* e = oc_core_find_at_entry_by_access_token("tok", 3);
+  ASSERT_NE(e, nullptr);
+  ASSERT_EQ(oc_byte_string_len(e->osc_salt), 2u);
+  ASSERT_EQ(oc_byte_string_len(e->osc_contextid), 2u);
+
+  const std::vector<uint8_t> full = make_complete_at_payload(16, false, 1, 10);
+  EXPECT_EQ(post_at(full.data(), full.size()), oc_status_code(OC_STATUS_CHANGED));
+
+  EXPECT_EQ(oc_byte_string_len(e->osc_salt), 0u);
+  EXPECT_EQ(oc_byte_string_len(e->osc_contextid), 0u);
+
+  /* the entry was also stored, keep storage clean for the following tests */
+  oc_delete_at_table();
+}
+
+/*
   an update of the <ga> scope only keeps the OSCORE contexts as they are
   - token "tok" created (OSCORE profile) -> its sender context exists; its SSN is moved on to 1234 (as after traffic)
   - POST the same id with <ga> [2] only -> 2.04

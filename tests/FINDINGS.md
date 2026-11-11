@@ -5,7 +5,7 @@ Defects in the stack found by its tests that are still open.
 A finding is removed once it is fixed (its test then asserts the corrected
 behaviour) or withdrawn. Numbers are never reused, and tests and comments
 keep citing them: `git log -p -S "F-NNN" -- tests/FINDINGS.md` shows a
-removed entry. The next number is F-073.
+removed entry. The next number is F-074.
 
 ## ~~F-029: `oc_endpoint_print()` frees an uninitialized string for non-IPv6 endpoints~~ - FIXED
 
@@ -552,3 +552,17 @@ removed entry. The next number is F-073.
 - **Expected:** a multicast request is dropped early only when its token has no group rights at all (neither `if.g.s` nor `<ga>`); an `if.g.s` token is accepted and the ACL decides per group address, as on unicast.
 - **Possible fix:** test the scope mask instead of `ga_len`: `(msg->endpoint.flags & MULTICAST) && !(oc_at_get_scope_mask(at_entry) & (OC_ACL_G | OC_ACL_GA))` (`oc_at_get_scope_mask()` is static in `api/oc_knx_sec.c` today -> expose it in `oc_knx_sec.h`); correct the comment of case (b).
 - **Fix:** the engine drops a multicast request only when the token's scope has neither `OC_ACL_G` (`if.g.s`) nor `OC_ACL_GA` (`<ga>`): `msg->endpoint.flags & MULTICAST && !(at_entry->scope & (OC_ACL_G | OC_ACL_GA))`. `ga_len` is no longer needed, because POST /auth/at gives a token a group address list exactly when it sets `OC_ACL_GA`. `scope` is read directly, so `oc_at_get_scope_mask()` stays static. The comments of case (b) and of the multicast echo branch say "group rights" now. `if.g.s` only takes effect at `/k`, the only resource with `OC_ACL_G` (spec 2.5.9.1), and multicast is always s-mode to `/k` (spec 2.6.9.1). Tests: `test_oc_oscore_echo_tx`, `OscoreEngine.MulticastRequestWithIfGsTokenIsDecrypted` (fails without the fix); the fixture token now has `OC_ACL_GA` as POST /auth/at sets it, and the drop test uses an `if.p` token. Runtime: `test_group_comm.py`, `TestMulticastWriteWithIfGsToken` (fails without the fix: /p/1 stays false) and the control `TestMulticastWriteWithoutGroupRights`.
+
+## ~~F-073: a full access token re-POSTed without salt or contextId keeps the old salt and contextId~~ - FIXED
+
+- **Files:** `api/oc_knx_sec.c`, `oc_core_auth_at_post_handler()` (shadow copy `oc_auth_at_t tmp = *at_entry;`, cnf:osc parser for contextId (8:4:6) and salt (8:4:5), `key_changed`).
+- **Severity:** Medium - after a re-keying with a full token, the device derives its keys with the OLD salt and sends the OLD contextId as `kid_context`; the MaC uses none -> every request with that token fails the AEAD check (unicast 4.00, multicast dropped silently) and multicast receivers find no context, without a hint at the cause.
+- **Description:**
+  - the shadow copy starts as a copy of the live entry, including `osc_salt` and `osc_contextid`
+  - the cnf parser overwrites only the members the request carries; a full token (id, cnf with id + ms, scope, profile) without salt / contextId therefore commits the old salt / contextId
+  - spec 2.6.7.3: `cnf` is not updatable in parts, only a full token replaces it (case d) -> it replaces the WHOLE key; spec 3.5.4.2 / 3.6.2: salt and contextId are optional members of `osc`, absent = none (RFC 8613 3.2: empty salt by default)
+  - `key_changed` compares the shadow copy with the live entry: an inherited salt / contextId counts as unchanged, so only the master secret / id change frees the contexts
+- **Evidence:** code reading.
+- **Expected:** a full token carrying `cnf` replaces all `osc` members; an optional member it does not carry (salt, contextId) is empty afterwards.
+- **Possible fix:** after the parse loop, if the request carried `cnf` (`AT_PROP_CNF`): set `tmp.osc_salt` / `tmp.osc_contextid` to an empty byte string when the request did not carry them (`AT_ALLOC_OSC_SALT` / `AT_ALLOC_OSC_CONTEXTID` not set) and set the allocator bit, so the commit frees the old values and a reject frees the empty copies; `key_changed` then sees the change. Test: POST a token with salt and contextId, re-POST it as a full token without them -> both empty (fails today).
+- **Fix:** in the b + d branch of `oc_core_auth_at_post_handler()`, before `key_changed`: if the request carried `cnf` (`AT_PROP_CNF`), `tmp.osc_salt` / `tmp.osc_contextid` are set to an empty byte string when the request did not carry them, with their allocator bit (`AT_ALLOC_OSC_SALT` / `AT_ALLOC_OSC_CONTEXTID`): the commit frees the old values, a reject frees the empty copies, `key_changed` sees the change and frees the contexts. Tests: `test_oc_knx_sec`, `SecAtPost.FullTokenWithoutSaltAndContextIdClearsTheOldOnes` (token with salt and contextId, full re-POST without them -> 2.04, both empty; fails without the fix).

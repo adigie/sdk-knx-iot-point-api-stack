@@ -1242,6 +1242,28 @@ static void oc_core_auth_at_post_handler(oc_request_t* request, oc_interface_mas
         OC_DBG("storage index: %d (%s) ", (int)(at_entry - g_at_entries), oc_string_checked(*access_token_id));
 
         /*
+          a token carrying 'cnf' replaces the WHOLE key (spec 2.6.7.3: cnf is not updatable in parts)
+          - the shadow copy started as a copy of the live entry -> an optional osc member the request does not carry
+            would keep its OLD value (old salt in the key derivation, old contextId as 'kid_context')
+          - absent = none (spec 3.6.2 Table 50: salt default empty, contextId omitted on a receiving device)
+          -> set to empty with its allocator bit: the commit frees the old value, a reject frees the empty copy
+        */
+        if (at_properties_seen & AT_PROP_CNF)
+        {
+          if (!(allocator & AT_ALLOC_OSC_SALT))
+          {
+            oc_new_byte_string(&tmp.osc_salt, "", 0);
+            allocator |= AT_ALLOC_OSC_SALT;
+          }
+
+          if (!(allocator & AT_ALLOC_OSC_CONTEXTID))
+          {
+            oc_new_byte_string(&tmp.osc_contextid, "", 0);
+            allocator |= AT_ALLOC_OSC_CONTEXTID;
+          }
+        }
+
+        /*
           an existing token rewritten (= CHANGED) with a NEW key (cnf values or profile differ from the live entry)
 
           1. oc_oscore_free_contexts_at_id() on commit frees ALL its contexts (sender and recipient), only when the key differs
