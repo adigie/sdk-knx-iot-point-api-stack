@@ -7,6 +7,9 @@
   production configuration.**
 - **The KNX IoT stack alone: 103 KiB flash on Thread, 111 KiB on Ethernet and
   Wi-Fi, 12–26 KiB static RAM, heap peak ~24 KiB.**
+- **Preliminary, FreeRTOS (ESP-IDF) on ESP32-C6: ~1.1 MiB flash and ~150 KiB
+  static RAM for a complete Thread or Wi-Fi device; the KNX IoT stack takes
+  161–169 KiB flash and 14–16 KiB static RAM there (§ 10).**
 
 ## 1. Conditions
 
@@ -24,6 +27,7 @@ move as the stack evolves. For a first estimate it is sufficient.
 | Application | EITT certification demo, 5 datapoints |
 | Boards measured | NXP FRDM-RW612 (Ethernet, Wi-Fi, Thread), NXP FRDM-MCXW72 (Thread, 256 KB RAM) |
 | Measured vs estimated | Flash and static RAM: measured from the linked images, built 2026-11-12. Heap and the struct sizes behind it (§ 7): estimated from the allocation model, not measured again; confirm on a device with `knx_iot malloc_heap`. `~` marks an estimate |
+| FreeRTOS (ESP-IDF) | **Preliminary**, § 10 only: the port is in beta; two images built once on 2026-11-12, not yet analysed in the depth of the Zephyr figures. Every other section describes the Zephyr builds |
 | Other targets | Other 32-bit MCUs land close to these numbers; 64-bit hosts run larger because pointer-heavy structs roughly double |
 
 ## 2. What you need
@@ -496,3 +500,54 @@ xychart-beta horizontal
 | OT diagnostics (link metrics, time sync, ping) | a few KiB each | `CONFIG_OPENTHREAD_*` |
 | Wi-Fi: HTTP server when provisioning is off | 27 KiB flash, 11 KiB RAM | `CONFIG_HTTP_SERVER=n` |
 | Radio firmware blobs | — | 224 KiB (Thread) / 347 KiB (Wi-Fi), cannot be reduced |
+
+## 10. Preliminary: FreeRTOS (ESP-IDF) on ESP32-C6
+
+**Preliminary.** The FreeRTOS port is in beta. These figures come from one
+build per backend and are not yet analysed in the depth of the Zephyr figures
+above; expect them to move.
+
+| Condition | Value used here |
+| --- | --- |
+| Stack and application | as in § 1: stack `829d68d1`, EITT certification demo, same table sizes, KNX stack logging at WARNING; demo applications at `0567ecb` (branch `build/freertos-guide-windows-scripts`) |
+| Toolchain and RTOS | ESP-IDF v6.1 (FreeRTOS, lwIP, Mbed TLS / PSA crypto), GCC 15.2, 32-bit RISC-V (ESP32-C6, RV32IMAC) |
+| Optimisation | `-Os` (`CONFIG_COMPILER_OPTIMIZATION_SIZE=y`) |
+| Configuration | development: console and KNX shell on, ESP-IDF logging at INFO, OpenThread CLI on. The Thread build is a Full Thread Device (the Zephyr builds are MTDs) |
+| Boards | Wi-Fi: Seeed XIAO ESP32-C6; Thread: Seeed IoT Button v2 (ESP32-C6); both 4 MiB flash, 442 KiB SRAM |
+| Method | as in § 9: sections of the linked image, attribution by archive from the linker map, built 2026-11-12 |
+
+| | Thread, ESP32-C6 | Wi-Fi, ESP32-C6 |
+| --- | --- | --- |
+| Flash used (application image) | **1 123 KiB** | **1 144 KiB** |
+| of an application partition of 1 920 KiB | 58 % | 60 % |
+| Static RAM | **148 KiB** | **150 KiB** |
+| of which code placed in RAM (IRAM) | 83 KiB | 94 KiB |
+| Left for the heap (of 442 KiB SRAM) | ~293 KiB | ~292 KiB |
+| KNX IoT stack flash / static RAM | 161 / 14 KiB | 169 / 16 KiB |
+| KNX share of image | 14 % / 10 % | 15 % / 10 % |
+| String pool of the whole image | 126 KiB | 104 KiB |
+
+Largest platform components, flash / static RAM:
+
+| Component | Thread | Wi-Fi |
+| --- | --- | --- |
+| OpenThread (FTD, CLI) | 281 / 53 KiB | — |
+| Wi-Fi libraries (`net80211`, `pp`, `coexist`) and WPA supplicant | — | 381 / 69 KiB |
+| Crypto (PSA crypto, Mbed TLS, X.509) | 182 / 1 KiB | 132 / 1 KiB |
+| lwIP | 90 / 3 KiB | 90 / 3 KiB |
+| Radio PHY and 802.15.4 driver | 49 / 17 KiB | 34 / 6 KiB |
+
+How to read these next to the Zephyr figures:
+
+- **The stack is larger here: 161–169 KiB against 103–111 KiB** for the same
+  sources and the same `-Os`. The instruction set (RV32IMAC against Thumb-2),
+  the compiler version and the ESP-IDF logging macros all differ; which of them
+  accounts for how much is not analysed yet. Its static RAM is in the same
+  range (14–16 KiB against 12–26 KiB).
+- **Static RAM is not comparable one to one.** ESP-IDF allocates most of what
+  Zephyr reserves statically (network buffers, task stacks, the Wi-Fi driver's
+  buffers) from the heap at run time, and counts 83–94 KiB of code placed in
+  RAM. The heap in use on a running device is not measured yet.
+- **No separate radio firmware blob**: the radio code is part of the libraries
+  listed above. The bootloader (separate image) is not included.
+- The heap model of § 7 is independent of the RTOS and applies unchanged.
