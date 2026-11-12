@@ -1,5 +1,13 @@
 # KNX IoT Point API Stack — Memory Footprint
 
+**At a glance** (32-bit Cortex-M33, Zephyr 4.5, `-Os`)
+
+- **Smallest complete Thread device (FRDM-MCXW72): 563 KiB flash, 162 KiB
+  static RAM as a development build; ~465 KiB / ~125 KiB estimated for a
+  production configuration.**
+- **The KNX IoT stack alone: 103 KiB flash on Thread, 111 KiB on Ethernet and
+  Wi-Fi, 12–26 KiB static RAM, heap peak ~24 KiB.**
+
 ## 1. Conditions
 
 Every figure in this document holds for the build described below and will
