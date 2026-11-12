@@ -159,7 +159,7 @@ class TestOscoreRequestAboveOneBlock:
             f"Size1 must be the block size {BLOCK_SIZE}, got {int.from_bytes(size1, 'big')}")
 
 
-# group object table entries for the Block1 transfer: 5 entries (the most one POST may carry, more -> 4.13),
+# group object table entries for the Block1 transfer: 5 entries (one POST may carry at most 10, more -> 4.13),
 # each with 20 group addresses above 65535 (5 bytes CBOR each, a GO table SHALL support >= 20, spec 2.5.7.3.2 Table 18)
 # -> ~115 bytes per entry, ~575 bytes: above ONE block and below MAX_APP_DATA_SIZE (the reassembly buffer)
 GOT_FIRST_ID = 1100

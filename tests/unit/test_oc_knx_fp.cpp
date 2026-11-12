@@ -959,9 +959,9 @@ TEST_F(GroupTableStorage, WriterEncodesNonAsBoolean)
  * network init.
  *
  * POST runs with the device info's LSM set to loading for the call only
- * (invoke_post); covered: a repeated ga key. Not covered here: the other POST
- * table-mutation paths and the DELETE happy path; those remain
- * integration-level per tests/COVERAGE_LEDGER.md.
+ * (invoke_post); covered: a repeated ga key and rejection of over-limit table
+ * collections. Not covered here: the other POST table-mutation paths and the
+ * DELETE happy path; those remain integration-level per tests/COVERAGE_LEDGER.md.
  * ═══════════════════════════════════════════════════════════════════════════ */
 
 extern "C" {
@@ -1586,7 +1586,7 @@ TEST_F(FpHandlers, PubPostIaOnAMulticastEntrySwitchesToUnicast)
 
 /* ───────── POST handlers: a collection is atomic (check all, then commit) ────
 
-   A collection rejected at a later entry stores nothing; more than 5 entries
+   A collection rejected at a later entry stores nothing; more than 10 entries
    -> 4.13; the same id twice -> 4.00; new entries get one slot each. */
 
 /* { 0: { 0: 1, 13: 1, 7: [9] }, 1: { 0: 2 } } -> entry 2 is id only and new -> 4.00 at the second entry */
@@ -1595,10 +1595,12 @@ static const uint8_t kTableCollectionLaterEntryFails[] = {
   0x01, 0xa1, 0x00, 0x02
 };
 
-/* { 0: { 0: 1 }, 1: { 0: 2 }, ..., 5: { 0: 6 } } -> 6 entries */
-static const uint8_t kTableSixEntries[] = {
-  0xa6, 0x00, 0xa1, 0x00, 0x01, 0x01, 0xa1, 0x00, 0x02, 0x02, 0xa1, 0x00, 0x03,
-  0x03, 0xa1, 0x00, 0x04, 0x04, 0xa1, 0x00, 0x05, 0x05, 0xa1, 0x00, 0x06
+/* { 0: { 0: 1 }, 1: { 0: 2 }, ..., 10: { 0: 11 } } -> 11 entries */
+static const uint8_t kTableElevenEntries[] = {
+  0xab,
+  0x00, 0xa1, 0x00, 0x01, 0x01, 0xa1, 0x00, 0x02, 0x02, 0xa1, 0x00, 0x03, 0x03, 0xa1, 0x00, 0x04,
+  0x04, 0xa1, 0x00, 0x05, 0x05, 0xa1, 0x00, 0x06, 0x06, 0xa1, 0x00, 0x07, 0x07, 0xa1, 0x00, 0x08,
+  0x08, 0xa1, 0x00, 0x09, 0x09, 0xa1, 0x00, 0x0a, 0x0a, 0xa1, 0x00, 0x0b
 };
 
 /* { 0: { 0: 1, 13: 1, 7: [9] }, 1: { 0: 1, 13: 2, 7: [9] } } -> id 1 twice */
@@ -1655,9 +1657,25 @@ TEST_F(FpHandlers, GoCollectionRejectedAtALaterEntryStoresNothing)
   oc_ri_delete_resource(r);
 }
 
-TEST_F(FpHandlers, RcpCollectionWithMoreThanFiveEntriesIsRejectedWith413)
+TEST_F(FpHandlers, GoCollectionWithMoreThanTenEntriesIsRejectedWith413)
 {
-  EXPECT_EQ(invoke_post(core_resource_knx_fp_r, kTableSixEntries, sizeof(kTableSixEntries)),
+  EXPECT_EQ(invoke_post(core_resource_knx_fp_g, kTableElevenEntries, sizeof(kTableElevenEntries)),
+            oc_status_code(OC_STATUS_REQUEST_ENTITY_TOO_LARGE));
+  EXPECT_EQ(oc_core_find_index_in_group_object_table_from_id(1), -1);
+  EXPECT_EQ(oc_core_find_index_in_group_object_table_from_id(11), -1);
+}
+
+TEST_F(FpHandlers, PubCollectionWithMoreThanTenEntriesIsRejectedWith413)
+{
+  EXPECT_EQ(invoke_post(core_resource_knx_fp_p, kTableElevenEntries, sizeof(kTableElevenEntries)),
+            oc_status_code(OC_STATUS_REQUEST_ENTITY_TOO_LARGE));
+  EXPECT_EQ(oc_core_find_index_in_publisher_table_from_id(1), -1);
+  EXPECT_EQ(oc_core_find_index_in_publisher_table_from_id(11), -1);
+}
+
+TEST_F(FpHandlers, RcpCollectionWithMoreThanTenEntriesIsRejectedWith413)
+{
+  EXPECT_EQ(invoke_post(core_resource_knx_fp_r, kTableElevenEntries, sizeof(kTableElevenEntries)),
             oc_status_code(OC_STATUS_REQUEST_ENTITY_TOO_LARGE));
 }
 

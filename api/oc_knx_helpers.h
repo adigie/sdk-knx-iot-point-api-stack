@@ -168,6 +168,28 @@ int oc_frame_query_l(char* url, bool ps_exists, int ps, bool total_exists, int t
 int oc_frame_integer(const int value);
 
 /*
+  entries of ONE POST collection on auth/at, fp/g, fp/p, fp/r (one limit for all four handlers)
+
+  FACTS:
+  1. a collection is atomic: every entry is checked into a shadow copy first, committed only when ALL entries passed
+  2. the shadow copies live in a local array of KNX_POST_MAX_ENTRIES on the STACK of the handler -> this define scales the
+     frame of all four handlers
+  3. more entries in one request -> 4.13 Request Entity Too Large (spec 2.6.3.3.2, RFC 7252 5.9.2.9), the client splits
+     the collection
+
+  DETAILS (stack depth, measured on Cortex-M33 with -Os):
+  - RISK PATH = POST auth/at: the handler runs in the stack thread below coap_receive -> oc_ri_invoke_coap_entity_handler
+    (about 1.6 KB), holds its array (about 150 bytes per entry) and then re-initializes the OSCORE contexts:
+    oc_init_oscore_from_storage -> oc_oscore_add_context -> HKDF -> PSA MAC -> SHA-256 (about 3 KB below the handler)
+    -> about 6.2 KB in total with 10 entries, the deepest path of the stack thread
+  - fp/g, fp/p, fp/r: array (about 100 bytes per entry, the size of oc_group_table_t) plus the storage write
+    (settings -> NVS, about 1.3 KB) -> about 4.5 KB in total with 10 entries
+  - the stack of the thread that runs the stack must cover the RISK PATH with headroom (Zephyr:
+    CONFIG_KNXIOT_THREAD_STACK_SIZE); a higher limit costs about 150 bytes per entry on that path
+*/
+#define KNX_POST_MAX_ENTRIES 10
+
+/*
   member flags of ONE entry of a POST (uint16_t), one layout for auth/at, fp/g, fp/p, fp/r
 
   - bits 0 ... 8   *_SEEN_*  -> the member is in the request (mandatory check, cnf present, salt/contextId carried,

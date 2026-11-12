@@ -74,17 +74,16 @@ static void tbl_switch_mode(oc_group_table_t* tmp, uint16_t* member_flags)
   - check pass: each entry is checked into its own shadow copy, kept in a local array on the stack
   - commit pass: only when ALL entries passed, each copy is committed and stored in request order
   - the first error frees all copies and answers the error, the tables stay unchanged
-  - more than TBL_POST_MAX_ENTRIES entries -> 4.13 (spec 2.6.3.3.2, RFC 7252 5.9.2.9), the MaC splits the collection
-  - the limit: the conformance template sends at most 5 entries per request; a PUB/RCP copy is about 96 bytes on 32 bit
+  - more than KNX_POST_MAX_ENTRIES entries -> 4.13 (spec 2.6.3.3.2, RFC 7252 5.9.2.9), the MaC splits the collection
+  - the limit and its stack cost: see KNX_POST_MAX_ENTRIES (oc_knx_helpers.h)
 */
-#define TBL_POST_MAX_ENTRIES 5
 
 /*
   one checked entry of a POST /fp/g, /fp/p or /fp/r request, committed only when ALL entries of the request passed
   - tmp: the shadow copy with the new values, 'go' on /fp/g, 'gt' on /fp/p and /fp/r (tmp id also on a deletion, for the duplicate check)
   - both table structs start with 'int32_t id' (common initial sequence, C11 6.5.2.3) -> tmp.go.id reads the id of both
     -> 'id' MUST stay the first member of oc_group_object_table_t and oc_group_table_t
-  - the union is as large as oc_group_table_t, 5 entries are about 480 bytes on 32 bit (the size /fp/p and /fp/r need anyway)
+  - the union is as large as oc_group_table_t, the same size for all three tables (the size /fp/p and /fp/r need anyway)
 */
 typedef struct
 {
@@ -532,18 +531,18 @@ static void oc_core_fp_g_post_handler(oc_request_t* request, oc_interface_mask_t
   oc_print_rep_as_json(request->request_payload, true);
 
   /*
-    A GO collection is atomic (see TBL_POST_MAX_ENTRIES): all entries are checked first, committed only when ALL passed,
+    A GO collection is atomic (see KNX_POST_MAX_ENTRIES): all entries are checked first, committed only when ALL passed,
     the last return code wins (created/changed)
   */
   const int entries_in_request = tbl_post_entry_count(request->request_payload);
-  if (entries_in_request > TBL_POST_MAX_ENTRIES)
+  if (entries_in_request > KNX_POST_MAX_ENTRIES)
   {
-    OC_ERR("%d entries in one request, max %d", entries_in_request, TBL_POST_MAX_ENTRIES);
+    OC_ERR("%d entries in one request, max %d", entries_in_request, KNX_POST_MAX_ENTRIES);
     oc_prepare_no_format_response_no_payload(request, OC_STATUS_REQUEST_ENTITY_TOO_LARGE);
     return;
   }
 
-  tbl_post_entry_t entries[TBL_POST_MAX_ENTRIES];
+  tbl_post_entry_t entries[KNX_POST_MAX_ENTRIES];
   int entry_count = 0;
   int new_entries = 0; // empty slots claimed by new entries of this request
 
@@ -1167,18 +1166,18 @@ static void oc_core_fp_p_post_handler(oc_request_t* request, oc_interface_mask_t
   oc_print_rep_as_json(request->request_payload, true);
 
   /*
-    A PUB collection is atomic (see TBL_POST_MAX_ENTRIES): all entries are checked first, committed only when ALL passed,
+    A PUB collection is atomic (see KNX_POST_MAX_ENTRIES): all entries are checked first, committed only when ALL passed,
     the last return code wins (created/changed)
   */
   const int entries_in_request = tbl_post_entry_count(request->request_payload);
-  if (entries_in_request > TBL_POST_MAX_ENTRIES)
+  if (entries_in_request > KNX_POST_MAX_ENTRIES)
   {
-    OC_ERR("%d entries in one request, max %d", entries_in_request, TBL_POST_MAX_ENTRIES);
+    OC_ERR("%d entries in one request, max %d", entries_in_request, KNX_POST_MAX_ENTRIES);
     oc_prepare_no_format_response_no_payload(request, OC_STATUS_REQUEST_ENTITY_TOO_LARGE);
     return;
   }
 
-  tbl_post_entry_t entries[TBL_POST_MAX_ENTRIES];
+  tbl_post_entry_t entries[KNX_POST_MAX_ENTRIES];
   int entry_count = 0;
   int new_entries = 0; // empty slots claimed by new entries of this request
 
@@ -1784,18 +1783,18 @@ static void oc_core_fp_r_post_handler(oc_request_t* request, oc_interface_mask_t
   oc_print_rep_as_json(request->request_payload, true);
 
   /*
-    A RCP collection is atomic (see TBL_POST_MAX_ENTRIES): all entries are checked first, committed only when ALL passed,
+    A RCP collection is atomic (see KNX_POST_MAX_ENTRIES): all entries are checked first, committed only when ALL passed,
     the last return code wins (created/changed)
   */
   const int entries_in_request = tbl_post_entry_count(request->request_payload);
-  if (entries_in_request > TBL_POST_MAX_ENTRIES)
+  if (entries_in_request > KNX_POST_MAX_ENTRIES)
   {
-    OC_ERR("%d entries in one request, max %d", entries_in_request, TBL_POST_MAX_ENTRIES);
+    OC_ERR("%d entries in one request, max %d", entries_in_request, KNX_POST_MAX_ENTRIES);
     oc_prepare_no_format_response_no_payload(request, OC_STATUS_REQUEST_ENTITY_TOO_LARGE);
     return;
   }
 
-  tbl_post_entry_t entries[TBL_POST_MAX_ENTRIES];
+  tbl_post_entry_t entries[KNX_POST_MAX_ENTRIES];
   int entry_count = 0;
   int new_entries = 0; // empty slots claimed by new entries of this request
 

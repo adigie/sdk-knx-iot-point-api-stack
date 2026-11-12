@@ -536,7 +536,7 @@ removed entry. The next number is F-078.
   | allocation failure while applying | as today | none, all allocated in the check pass | possible in pass 2, needs A as fallback |
   | new limit | none | 10 entries -> 4.13 | none |
 
-- **Fix:** option B. `oc_core_auth_at_post_handler()` counts the entries first (more than `AT_POST_MAX_ENTRIES` (10) -> 4.13), then checks each entry into `at_post_entry_t entries[10]` on the stack (shadow copy, allocator bits, delete flag, key-change flag); every error goes through `at_post_reject()` (frees the current and all earlier copies, answers the status) and changes nothing. A duplicate id in the request -> 4.00. Only when all passed, the commit loop deletes / frees the contexts on a key change / replaces the entry / writes the id / stores, then `oc_init_oscore_from_storage()` as before. `find_empty_at_entry(skip)` gives the nth new token of the request the nth free slot (ids are written on commit); the PASE caller passes 0. Tests: `test_oc_knx_sec`, `SecAtPost.CollectionRejectedAtALaterEntryKeepsTheEarlierTokenAndItsContexts` and `CollectionWithMoreThanTenEntriesIsRejectedWith413` (both fail without the fix), `TenNewTokensInOneRequestAreCreatedInTenSlots`, `SameIdTwiceInOneRequestIsRejected`, `DeleteAndRecreateInOneRequestIsRejected`.
+- **Fix:** option B. `oc_core_auth_at_post_handler()` counts the entries first (more than `KNX_POST_MAX_ENTRIES` (10, was `AT_POST_MAX_ENTRIES`) -> 4.13), then checks each entry into `at_post_entry_t entries[10]` on the stack (shadow copy, allocator bits, delete flag, key-change flag); every error goes through `at_post_reject()` (frees the current and all earlier copies, answers the status) and changes nothing. A duplicate id in the request -> 4.00. Only when all passed, the commit loop deletes / frees the contexts on a key change / replaces the entry / writes the id / stores, then `oc_init_oscore_from_storage()` as before. `find_empty_at_entry(skip)` gives the nth new token of the request the nth free slot (ids are written on commit); the PASE caller passes 0. Tests: `test_oc_knx_sec`, `SecAtPost.CollectionRejectedAtALaterEntryKeepsTheEarlierTokenAndItsContexts` and `CollectionWithMoreThanTenEntriesIsRejectedWith413` (both fail without the fix), `TenNewTokensInOneRequestAreCreatedInTenSlots`, `SameIdTwiceInOneRequestIsRejected`, `DeleteAndRecreateInOneRequestIsRejected`.
 
 ## ~~F-072: an inbound multicast request protected with an `if.g.s` token is dropped, although `if.g.s` authorizes all group addresses~~ - FIXED
 
@@ -605,7 +605,7 @@ removed entry. The next number is F-078.
 - **Description:**
   - the GO handler documents it: "on a 4.00 / 5.00 the previously written entries - from a collection - are not restored (currently to complicate)"; `/fp/p` and `/fp/r` work the same way
   - a collection has no entry limit; the same id twice in one request overwrites the first entry ("last wins") instead of being rejected
-  - `/auth/at` has the same structure since F-071: check pass into shadow copies on the stack, commit pass only when ALL entries passed, at most `AT_POST_MAX_ENTRIES` (10) entries (more -> 4.13), the same id twice -> 4.00, `at_post_reject()` frees the current and all earlier copies and answers the error
+  - `/auth/at` has the same structure since F-071: check pass into shadow copies on the stack, commit pass only when ALL entries passed, at most `KNX_POST_MAX_ENTRIES` (10, was `AT_POST_MAX_ENTRIES`) entries (more -> 4.13), the same id twice -> 4.00, `at_post_reject()` frees the current and all earlier copies and answers the error
 - **Evidence:** code reading.
 - **Expected:** a rejected collection leaves all three tables unchanged (atomic), as on `/auth/at`.
 - **Plan (as on `/auth/at`):**
@@ -622,15 +622,15 @@ removed entry. The next number is F-078.
   - an empty array on a key other than ga -> 4.00 (F-075), any other unexpected type -> 4.00 (`default`)
 - **Not part of this finding:** a re-POST of an existing entry keeps the members it does not carry (partial update instead of a replace) -> F-077.
 - **Fix:** the three POST handlers in `api/oc_knx_fp.c` work as `/auth/at` (stack array, option A of the plan):
-  - `TBL_POST_MAX_ENTRIES` 5 (the template sends at most 5 entries per request): `tbl_post_entry_count()` counts the entries (top-level objects) before any is processed, more -> 4.13
-  - check pass into `tbl_post_entry_t entries[5]` on the stack: one entry type for all three tables, the shadow copy is a union (`tmp.go` on `/fp/g`, `tmp.gt` on `/fp/p`, `/fp/r`); both table structs start with `int32_t id` (common initial sequence, C11 6.5.2.3), so `tbl_post_has_id()` reads the id of both -> `id` must stay the first member; 5 entries are about 480 bytes on 32 bit
+  - `KNX_POST_MAX_ENTRIES` 10 in `api/oc_knx_helpers.h`, the ONE limit of `/auth/at` and the three tables (first `TBL_POST_MAX_ENTRIES` 5; the Point API template sends at most 5 entries per request); its comment names the stack risk path (POST `/auth/at`: array + OSCORE re-initialization, about 6.2 KB on Cortex-M33 in the 12 KiB Zephyr stack thread; the tables about 4.5 KB): `tbl_post_entry_count()` counts the entries (top-level objects) before any is processed, more -> 4.13
+  - check pass into `tbl_post_entry_t entries[KNX_POST_MAX_ENTRIES]` on the stack: one entry type for all three tables, the shadow copy is a union (`tmp.go` on `/fp/g`, `tmp.gt` on `/fp/p`, `/fp/r`); both table structs start with `int32_t id` (common initial sequence, C11 6.5.2.3), so `tbl_post_has_id()` reads the id of both -> `id` must stay the first member; about 100 bytes per entry on 32 bit
   - every error (also before a copy exists: id missing, no free slot) goes through `go_post_reject()` / `gt_post_reject()`: frees the current and all earlier copies, answers the error, nothing stored
   - the same id twice in one request -> 4.00 (`tbl_post_has_id()`)
   - an id-only delete is recorded (`delete_entry`), not executed in the check pass
   - commit pass after ALL entries passed, in request order: delete, or release the replaced live values, take over the copy and store it
   - new entries claim slots with `skip` (`find_empty_slot_in_table(..., skip)`, `find_empty_go_slot(skip)`), the nth new entry gets the nth free slot; the public `find_empty_slot_in_group_object_table()` keeps its signature
   - conformance 5.5 passes (Docker)
-  - Tests: `test_oc_knx_fp`, `FpHandlers.RcpCollectionRejectedAtALaterEntryStoresNothing`, `PubCollectionRejectedAtALaterEntryStoresNothing`, `GoCollectionRejectedAtALaterEntryStoresNothing`, `RcpCollectionWithMoreThanFiveEntriesIsRejectedWith413`, `RcpSameIdTwiceInOneRequestIsRejected` (all five fail without the fix), `RcpTwoNewEntriesInOneRequestGetTwoSlots` (guards the slot claim).
+  - Tests: `test_oc_knx_fp`, `FpHandlers.RcpCollectionRejectedAtALaterEntryStoresNothing`, `PubCollectionRejectedAtALaterEntryStoresNothing`, `GoCollectionRejectedAtALaterEntryStoresNothing`, `RcpCollectionWithMoreThanTenEntriesIsRejectedWith413`, `RcpSameIdTwiceInOneRequestIsRejected` (all five fail without the fix), `RcpTwoNewEntriesInOneRequestGetTwoSlots` (guards the slot claim).
 
 ## ~~F-077: a POST /fp/r or /fp/p to an existing entry keeps the members it does not carry, a switch between unicast and multicast does not take effect~~ - FIXED
 

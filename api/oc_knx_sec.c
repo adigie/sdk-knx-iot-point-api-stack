@@ -710,9 +710,6 @@ static void oc_free_allocated_at_elements(oc_auth_at_t* entry, uint16_t member_f
   }
 }
 
-// entries of one POST /auth/at request that are checked into shadow copies on the stack, more -> 4.13
-#define AT_POST_MAX_ENTRIES 10
-
 // one checked entry of a POST /auth/at request, committed only when ALL entries of the request passed
 typedef struct
 {
@@ -761,7 +758,7 @@ static void oc_core_auth_at_post_handler(oc_request_t* request, oc_interface_mas
     - commit pass -> only when ALL entries passed, nothing can fail there (all values were allocated in the check pass)
     -> a rejected request never leaves an earlier entry committed (its contexts freed, but not re-initialized)
   */
-  at_post_entry_t entries[AT_POST_MAX_ENTRIES];
+  at_post_entry_t entries[KNX_POST_MAX_ENTRIES];
   int entry_count = 0; // number of entries checked into shadow copies, committed only when ALL entries passed
   int new_tokens = 0;  // empty slots claimed by new tokens of this request
   OC_INF("oc_core_auth_at_post_handler");
@@ -788,9 +785,9 @@ static void oc_core_auth_at_post_handler(oc_request_t* request, oc_interface_mas
     }
   }
 
-  if (entries_in_request > AT_POST_MAX_ENTRIES)
+  if (entries_in_request > KNX_POST_MAX_ENTRIES)
   {
-    OC_ERR("%d access tokens in one request, max %d", entries_in_request, AT_POST_MAX_ENTRIES);
+    OC_ERR("%d access tokens in one request, max %d", entries_in_request, KNX_POST_MAX_ENTRIES);
     oc_prepare_no_format_response_no_payload(request, OC_STATUS_REQUEST_ENTITY_TOO_LARGE);
     return;
   }
