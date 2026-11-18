@@ -66,10 +66,15 @@ The scope names the part of the stack that is changed. Use lower case and prefer
 | `security` | `security/` (SPAKE2+, access tokens, auth) |
 | `mdns` / `dns-sd` | `port/mdns/`, DNS-SD |
 | `zephyr` | `port/zephyr/`, `zephyr/` |
-| `esp-idf` | `port/freertos_esp32/`, `esp-idf/` |
+| `freertos` | `port/freertos_esp32/`, `esp-idf/` |
 | `linux` / `windows` | host ports |
+| `soc` | vendor or SoC specific code, boards, patches (name the vendor in the description) |
+| `wifi` / `thread` / `ethernet` | network backend |
+| `config` | CMake options, Kconfig, presets |
 | `tests` | `tests/` |
 | `tools` | `tools/`, `scripts/` |
+
+Combine an operating system with a network backend with a slash, for example `fix(zephyr/thread): ...`.
 
 Leave the scope out when a change spans many areas.
 
